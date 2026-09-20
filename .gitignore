@@ -1,0 +1,39 @@
+.local/
+bin/
+obj/
+publish/
+.vs/
+*.exe
+*.dll
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+# Local credentials, exported connection settings, and user preferences
+settings.json
+ui.json
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+router-speed-connection*.json
+router-speed-credentials*.json
+router-files/etc/router-speed/
+# Machine-specific deployment notes and one-time migration scripts
+/VERIFICATION.md
+/install-menu.sh
+/remove-old-monitor.sh
+# Generated diagnostics and test output
+*.log
+*.jsonl
+artifacts/
+**/results.json
+**/*-results.json
+collector/.cache/
+collector/router-speed-collector
+router-control/.cache/
+router-control/router-speed-control
+router-files/usr/libexec/router-speed-control
+router-files/usr/libexec/router-speed-collector

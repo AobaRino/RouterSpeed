@@ -1,0 +1,7 @@
+{
+  "luci-app-router-speed": {
+    "description": "View RouterSpeed counters and manage collector settings",
+    "read": { "ubus": { "router-speed": [ "status", "config" ] } },
+    "write": { "ubus": { "router-speed": [ "save", "credentials", "rotate_token" ] } }
+  }
+}

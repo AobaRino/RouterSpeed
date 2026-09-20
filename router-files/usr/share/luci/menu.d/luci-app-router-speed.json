@@ -1,0 +1,8 @@
+{
+  "admin/services/router-speed": {
+    "title": "网速采集器",
+    "order": 85,
+    "action": { "type": "view", "path": "router-speed/overview" },
+    "depends": { "acl": [ "luci-app-router-speed" ] }
+  }
+}

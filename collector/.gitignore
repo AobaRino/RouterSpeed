@@ -1,0 +1,4 @@
+.cache/
+.modcache/
+router-speed-collector
+*.exe

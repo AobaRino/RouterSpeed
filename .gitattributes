@@ -1,0 +1,13 @@
+* text=auto
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.go text eol=lf
+*.mod text eol=lf
+*.md text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+router-files/etc/config/* text eol=lf
+router-files/etc/init.d/* text eol=lf
+router-files/usr/libexec/rpcd/* text eol=lf
+router-files/www/cgi-bin/* text eol=lf
