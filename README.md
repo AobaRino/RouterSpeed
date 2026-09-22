@@ -1,17 +1,14 @@
 # RouterSpeed
 
-从 ImmortalWrt 路由器采集流量，在 Windows 上分别显示**本机直连 / 代理的实时上传和下载速度**。路由器端提供 LuCI“网速采集器”菜单，Windows 端提供悬浮网速条和任务栏附近的紧凑显示。
+从 ImmortalWrt 路由器采集流量，在 Windows 上分别显示**本机直连 / 代理的实时上传和下载速度**。路由器端提供 LuCI“网速采集器”菜单，Windows 端提供一个常驻桌面的小面板。
 
 ## 功能
 
-- **Windows 网速条**：悬浮模式支持拖动、置顶和隐藏；任务栏模式在主屏水平任务栏的托盘左侧显示两行紧凑数据（`D` 直连、`P` 代理，▼ 下载、▲ 上传），背景透明、文字直接落在深色任务栏上。悬浮模式采用 TrafficMonitor 式的面板布局；在程序目录或 `%LOCALAPPDATA%\RouterSpeed` 放一张 `skin.png` 即可作为面板皮肤，面板尺寸随图片，文字颜色按皮肤明暗自动选择。右键可查看完整速率、状态和连接设置，不显示鼠标悬停提示。
-- **显示与快捷键**：右键“显示模式”切换两种模式，保留悬浮位置和置顶偏好。默认 `Ctrl + Alt + N` 显示 / 隐藏，可修改或停用；双击托盘图标也可切换显示。
+- **Windows 网速面板**：TrafficMonitor 风格的两行面板（`直连:` / `代理:`，▼ 下载、▲ 上传），默认停在主屏右下角、任务栏上方。可拖动，也可以在右键菜单里“锁定位置”固定不动；“保持置顶”默认关闭，全屏程序会正常盖住它。在程序目录或 `%LOCALAPPDATA%\RouterSpeed` 放一张 `skin.png` 即可作为面板皮肤，面板尺寸随图片，文字颜色按皮肤明暗自动选择。右键可查看完整速率、状态和连接设置，不显示鼠标悬停提示。
+- **显示与快捷键**：默认 `Ctrl + Alt + N` 显示 / 隐藏，可修改或停用；双击托盘图标也可切换显示。
 - **登录自启**：右键“开机自启”使用当前用户的 Windows 登录任务，以普通交互用户权限在登录约 10 秒后启动，无需保存 Windows 密码。移动程序目录后需重新开启自启。
 - **LuCI 菜单**：在“服务 → 网速采集器”查看直连、代理、未分类的实时上下行、采样时间和累计采集丢包；设置要统计的本机 IPv4、LAN 采集接口及采集启停。
 - **连接配置**：LuCI 可生成、复制、下载或重置只读密钥；Windows 支持粘贴或导入连接配置，保存后立即生效。
-- **TrafficMonitor 插件**：已经在用 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 的话，可以不装本项目的 Windows 程序，改用 [`traffic-monitor-plugin/`](traffic-monitor-plugin/README.md) 里的插件把直连 / 代理网速加进 TrafficMonitor 的任务栏和悬浮窗，复用它的皮肤、嵌入任务栏和设置界面。
-
-任务栏显示采用独立窗口，不为 Windows 保留布局空间，也不注入或重启 Explorer。当前支持主屏水平任务栏；全屏或任务栏自动隐藏时暂时隐藏，空间不足或布局长期不可用时回退到悬浮位置。短暂布局变化会等待确认，避免立即切换尺寸；手动隐藏后不会自动重新显示。开始菜单、搜索或托盘弹层打开时，Windows 会把任务栏提升到桌面窗口层之上，此时网速条被任务栏遮挡属正常现象；任务栏回到桌面层后立即恢复显示，期间不会退回悬浮位置。
 
 ## 运行条件与兼容范围
 
@@ -43,20 +40,12 @@ go -C router-control build -trimpath -ldflags='-s -w' -o ../router-files/usr/lib
 
 ## 测试
 
-Go 测试请在未设置交叉编译 `GOOS` / `GOARCH` 的终端中执行，确保测试程序面向本机系统：
+Windows 端的单元测试和 Go 测试如下；Go 测试请在未设置交叉编译 `GOOS` / `GOARCH` 的终端中执行，确保测试程序面向本机系统：
 
 ```powershell
 dotnet run --project tests/RouterSpeed.Tests.csproj -c Release
 go -C collector test ./...
 go -C router-control test ./...
-```
-
-可选的任务栏布局、窗口层级和界面回归在 Windows 交互桌面上运行；界面检查使用独立测试窗口：
-
-```powershell
-dotnet run --project tests/taskbar-layout-check/LayoutCheck.csproj -c Release
-dotnet run --project tests/window-order-check/WindowOrderCheck.csproj -c Release -- --observer-integration
-dotnet run --project tests/dock-ui-check/DockUiCheck.csproj -c Release
 ```
 
 ## 首次部署
@@ -94,7 +83,7 @@ API 使用现有 uhttpd 配置，不额外开监听端口。若使用 HTTP，传
 ## 统计范围与限制
 
 - 只统计所选电脑的 **IPv4 公网 TCP / UDP**，不含 IPv6、局域网访问和其他协议。
-- `KB` / `MB` 按 1024 进位；紧凑显示中的 `K` / `M` / `G` 分别表示 KB/s、MB/s、GB/s。
+- `KB` / `MB` 按 1024 进位。
 - 字节数包含 IPv4 头和重传，可能受到网卡卸载、采集丢包和接口选择影响，与应用下载文件大小不同。
 - dae 的 domain 模式可能在用户态再次分流。内核确认的 DIRECT 视为直连，其他流量结合最终路由日志分类；无法确认的流量计入“未分类”，不会默认为直连。
 - 等待日志可能引入短暂延迟。未分类或连接异常会显示状态提示；断线显示横杠并自动重试。

@@ -37,4 +37,3 @@ router-control/.cache/
 router-control/router-speed-control
 router-files/usr/libexec/router-speed-control
 router-files/usr/libexec/router-speed-collector
-traffic-monitor-plugin/build/
