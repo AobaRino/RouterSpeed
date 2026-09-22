@@ -7,7 +7,7 @@ namespace RouterSpeed;
 
 /// <summary>
 /// A small desktop panel in the TrafficMonitor style: two "label: value" rows on a dark
-/// rounded card or an optional skin image. It can be dragged, locked in place, kept on top,
+/// semi-transparent plate with square corners, or an optional skin image. It can be dragged, locked in place, kept on top,
 /// hidden with a shortcut, and it never touches the taskbar. All rates supplied by the
 /// poller are bytes per second.
 /// </summary>
@@ -17,8 +17,13 @@ public sealed class SpeedBarForm : Form
     private const int LogicalWidth = 270;
     private const int LogicalHeight = 56;
     private const int Inset = 5;
-    private static readonly Color Surface = Color.FromArgb(22, 27, 38);
-    private static readonly Color Foreground = Color.FromArgb(237, 243, 252);
+    // Sampled from the TrafficMonitor skin this panel imitates: a dark teal plate at 80%
+    // window opacity, square corners, a hairline border and a divider between the rows.
+    private static readonly Color Surface = Color.FromArgb(16, 50, 60);
+    private static readonly Color Foreground = Color.FromArgb(246, 250, 252);
+    private static readonly Color Edge = Color.FromArgb(46, 255, 255, 255);
+    private const int DefaultOpacityPercent = 80;
+    private static readonly int[] OpacityChoices = [100, 90, 80, 70, 60, 50];
     // Tray icon colours: cyan for direct, violet for proxy, grey while disconnected.
     private static readonly Color Muted = Color.FromArgb(130, 142, 161);
     private static readonly Color DirectColor = Color.FromArgb(88, 214, 215);
@@ -36,6 +41,7 @@ public sealed class SpeedBarForm : Form
     private readonly string _preferencesPath;
     private readonly ToolStripMenuItem _topmostItem;
     private readonly ToolStripMenuItem _lockItem;
+    private readonly ToolStripMenuItem _opacityItem = new("透明度");
     private readonly ToolStripMenuItem _visibilityItem;
     private readonly ToolStripLabel _statusItem = new();
     private readonly ToolStripMenuItem _detailsItem = new("实时数据与说明");
@@ -55,6 +61,7 @@ public sealed class SpeedBarForm : Form
     private bool _userHidden;
     private bool _started;
     private bool _locked;
+    private int _opacityPercent = DefaultOpacityPercent;
 
     public SpeedBarForm(Func<CancellationToken, Task<SpeedSnapshot>> poll, Action? configure = null)
         : this(poll, configure, PreferencesPath) { }
@@ -82,6 +89,8 @@ public sealed class SpeedBarForm : Form
         _preferences = ReadPreferences();
         TopMost = _preferences?.AlwaysOnTop ?? false;
         _locked = _preferences?.Locked ?? false;
+        _opacityPercent = Math.Clamp(_preferences?.OpacityPercent ?? DefaultOpacityPercent, 30, 100);
+        Opacity = _opacityPercent / 100d;
         _shortcut = _preferences is { ShortcutConfigured: true } ? _preferences.Shortcut : ShortcutDefinition.Default;
 
         _visibilityItem = new ToolStripMenuItem("隐藏网速条", null, (_, _) => ToggleVisibility());
@@ -104,6 +113,20 @@ public sealed class SpeedBarForm : Form
             _lockItem.Checked = _locked;
             SavePreferences();
         };
+        _opacityItem.DropDown.ShowItemToolTips = false;
+        foreach (int percent in OpacityChoices)
+        {
+            int value = percent;
+            var choice = new ToolStripMenuItem($"{value} %") { Checked = value == _opacityPercent, Tag = value };
+            choice.Click += (_, _) =>
+            {
+                _opacityPercent = value;
+                Opacity = value / 100d;
+                UpdateOpacityMenu();
+                SavePreferences();
+            };
+            _opacityItem.DropDownItems.Add(choice);
+        }
         _menu.ShowItemToolTips = false;
         _detailsItem.DropDown.ShowItemToolTips = false;
         _detailsItem.DropDownOpening += (_, _) => UpdateDetailValues();
@@ -115,6 +138,7 @@ public sealed class SpeedBarForm : Form
         _menu.Items.Add(_hotkeyErrorItem);
         _menu.Items.Add(_lockItem);
         _menu.Items.Add(_topmostItem);
+        _menu.Items.Add(_opacityItem);
         _menu.Items.Add(_startupItem);
         _menu.Items.Add("重置位置", null, (_, _) => { ResetPosition(); ShowBar(); SavePreferences(); });
         _menu.Items.Add(new ToolStripSeparator());
@@ -148,7 +172,6 @@ public sealed class SpeedBarForm : Form
         if (_started) return;
         _started = true;
         RestorePosition();
-        RefreshWindowRegion();
         _pollTask ??= PollContinuouslyAsync(_lifetime.Token);
     }
 
@@ -226,18 +249,19 @@ public sealed class SpeedBarForm : Form
         }
         else
         {
-            using var outline = RoundedRectangle(new RectangleF(.5f, .5f, width - 1, height - 1), 9);
-            using var border = new Pen(Color.FromArgb(62, 73, 91));
-            g.DrawPath(border, outline);
+            using var border = new Pen(Edge);
+            g.DrawRectangle(border, .5f, .5f, width - 1, height - 1);
         }
+        // A disconnected panel greys out completely instead of showing a warning marker.
+        if (!_snapshot.Connected) text = Muted;
         float rowHeight = (height - 2 * Inset) / 2;
         PaintRow(g, HasUnclassifiedTraffic ? "直连*:" : "直连:", Inset, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
-        PaintRow(g, HasUnclassifiedTraffic ? "代理*:" : "代理:", Inset + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
-        if (!_snapshot.Connected || HasUnclassifiedTraffic)
+        if (_skin is null)
         {
-            using var warning = new SolidBrush(Color.FromArgb(233, 177, 92));
-            g.FillEllipse(warning, width - 9, 5, 4, 4);
+            using var divider = new Pen(Edge);
+            g.DrawLine(divider, 8, Inset + rowHeight, width - 8, Inset + rowHeight);
         }
+        PaintRow(g, HasUnclassifiedTraffic ? "代理*:" : "代理:", Inset + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
     }
 
     private void PaintRow(Graphics g, string label, float y, float height, double down, double up, Color text)
@@ -360,40 +384,12 @@ public sealed class SpeedBarForm : Form
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    protected override void OnResize(EventArgs e)
-    {
-        base.OnResize(e);
-        RefreshWindowRegion();
-    }
-
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
         Size logical = LogicalSize;
         ClientSize = new Size((int)Math.Round(logical.Width * DeviceDpi / 96f), (int)Math.Round(logical.Height * DeviceDpi / 96f));
-        RefreshWindowRegion();
         Invalidate();
-    }
-
-    private void RefreshWindowRegion()
-    {
-        if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-        using var shape = RoundedRectangle(new RectangleF(0, 0, ClientSize.Width, ClientSize.Height), 10 * DeviceDpi / 96f);
-        Region? previous = Region;
-        Region = new Region(shape);
-        previous?.Dispose();
-    }
-
-    private static GraphicsPath RoundedRectangle(RectangleF bounds, float radius)
-    {
-        var path = new GraphicsPath();
-        float diameter = Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height));
-        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-        return path;
     }
 
     private void ToggleVisibility()
@@ -418,8 +414,16 @@ public sealed class SpeedBarForm : Form
         _hotkeyErrorItem.Visible = _hotkey.RegistrationError is not null;
         _lockItem.Checked = _locked;
         _topmostItem.Checked = TopMost;
+        UpdateOpacityMenu();
         UpdateStartupMenu();
         UpdateDetailValues();
+    }
+
+    private void UpdateOpacityMenu()
+    {
+        _opacityItem.Text = $"透明度：{_opacityPercent} %";
+        foreach (ToolStripItem item in _opacityItem.DropDownItems)
+            if (item is ToolStripMenuItem choice && choice.Tag is int value) choice.Checked = value == _opacityPercent;
     }
 
     private void UpdateStartupMenu()
@@ -526,7 +530,7 @@ public sealed class SpeedBarForm : Form
     {
         try
         {
-            var settings = new UiPreferences(Location.X, Location.Y, TopMost, true, _shortcut, _locked);
+            var settings = new UiPreferences(Location.X, Location.Y, TopMost, true, _shortcut, _locked, _opacityPercent);
             string file = _preferencesPath;
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
             File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(settings));
@@ -586,7 +590,7 @@ public sealed class SpeedBarForm : Form
 
     // Older files also carry a DisplayMode field; unknown properties are ignored on read.
     private sealed record UiPreferences(int X, int Y, bool AlwaysOnTop, bool ShortcutConfigured = false,
-        ShortcutDefinition? Shortcut = null, bool Locked = false);
+        ShortcutDefinition? Shortcut = null, bool Locked = false, int OpacityPercent = DefaultOpacityPercent);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
