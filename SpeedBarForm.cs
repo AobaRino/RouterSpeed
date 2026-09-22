@@ -507,9 +507,12 @@ public sealed class SpeedBarForm : Form
             }
             else
             {
-                _placementDetail = _isDocked ? "任务栏布局更新中，保持已验证的位置。" : "正在等待任务栏布局稳定。";
+                _placementDetail = snapshot.Covered ? snapshot.Detail
+                    : _isDocked ? "任务栏布局更新中，保持已验证的位置。" : "正在等待任务栏布局稳定。";
                 if (!_userHidden && !Visible) Show();
-                // Do not compete with the tray popup's Z order during layout changes.
+                // Do not compete with the tray popup's Z order during layout changes. A raised
+                // taskbar is not a layout change: keep asking until it is back in our band.
+                if (snapshot.Covered && _isDocked && !_userHidden) TaskbarWindowOrder.KeepAboveTaskbar(Handle);
             }
             if (_userHidden && Visible) Hide();
             if (_menu.Visible) UpdatePlacementMenu();
@@ -524,6 +527,10 @@ public sealed class SpeedBarForm : Form
         // Current performs only bounded native reads on this thread. Do not run
         // placement, change visibility, or synchronously query UI Automation here.
         TaskbarDockSnapshot snapshot = _dockSnapshotSource();
+        // A shell event while the taskbar is raised may be it returning to the desktop band.
+        // Re-sample right away so the next placement pass sees the live layout, and try the
+        // Z-order repair now: it succeeds only once the taskbar is enumerable again.
+        if (snapshot.Covered) _dockMonitor?.RequestRefresh();
         if (!snapshot.ShouldHide && (snapshot.IsAvailable || snapshot.CanKeepPlacement) &&
             snapshot.AvailableArea.Contains(Bounds))
             TaskbarWindowOrder.KeepAboveTaskbar(Handle);

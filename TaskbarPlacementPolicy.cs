@@ -35,6 +35,19 @@ internal sealed class TaskbarPlacementPolicy(Func<long>? clockMilliseconds = nul
         bool docked, Rectangle currentBounds)
     {
         long now = _clock();
+        if (snapshot.Covered)
+        {
+            // The shell raised its taskbar above the desktop band (Start menu, search, tray
+            // flyouts). The overlay cannot be drawn above it and the layout has not changed,
+            // so neither the confirmation timers nor the floating fallback may advance: a docked
+            // bar simply waits underneath and is raised again the moment the taskbar comes back.
+            ResetCandidate();
+            _unavailableSince = null;
+            _confirmedFailureSince = null;
+            _failureSamples = 0;
+            _lastFailureSample = default;
+            return docked && !_recoveryRequired ? TaskbarPlacementAction.Keep : WaitForRecovery();
+        }
         if (target is { } desired)
         {
             _unavailableSince = null;
