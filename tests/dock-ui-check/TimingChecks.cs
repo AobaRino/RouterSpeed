@@ -18,6 +18,33 @@ internal static partial class Program
         Run("Manual hide is honored during all timing and recovery paths", HiddenDuringTiming);
         Run("Fullscreen hides immediately and clears fallback timing", FullscreenDuringTiming);
         Run("Changing targets need stability and do not move on short jitter", TargetJitter);
+        Run("Raised taskbar band keeps placement indefinitely and redocks on the first live sample", CoveredTaskbar);
+    }
+
+    private static TaskbarDockSnapshot Covered(Harness h) => h.Snapshot with
+    {
+        IsAvailable=false,LayoutConfirmed=false,CanKeepPlacement=true,Covered=true,
+        ShouldHide=false,Detail="测试：任务栏位于系统弹层之上"
+    };
+
+    private static void CoveredTaskbar()
+    {
+        using var h=new Harness(taskbar:true);
+        int move=0,visibility=0;
+        h.Bar.LocationChanged+=(_,_)=>move++;h.Bar.VisibleChanged+=(_,_)=>visibility++;
+        TaskbarDockSnapshot stable=h.Snapshot;Rectangle original=h.Bar.Bounds;
+        // Explorer can keep the taskbar raised far longer than the ten-second unknown fallback.
+        h.Snapshot=Covered(h);h.Settle(30000);
+        Check(Field<bool>(h.Bar,"_isDocked")&&h.Bar.Visible&&h.Bar.Bounds==original&&move==0&&visibility==0,
+            "A raised taskbar changed presentation or fell back to floating.");
+        h.Snapshot=stable;h.Step(350);
+        Check(Field<bool>(h.Bar,"_isDocked")&&h.Bar.Bounds==original&&Field<string>(h.Bar,"_placementDetail").Contains("已贴靠"),
+            "Docking did not resume on the first live sample after the taskbar returned.");
+        // A bar that was never docked must not appear at the floating position while covered.
+        using var fresh=new Harness(taskbar:true);
+        fresh.Snapshot=Covered(fresh) with {CanKeepPlacement=false,AvailableArea=Rectangle.Empty};
+        Call(fresh.Bar,"RestoreFloatingPresentation");SetField(fresh.Bar,"_isDocked",false);fresh.Settle(12000);
+        Check(!fresh.Bar.Visible&&!Field<bool>(fresh.Bar,"_isDocked"),"An undocked bar surfaced while the taskbar was raised.");
     }
 
     private static TaskbarDockSnapshot Transient(Harness h,bool keep) => h.Snapshot with

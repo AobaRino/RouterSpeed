@@ -8,8 +8,11 @@ namespace RouterSpeed;
 
 public sealed record TaskbarDockSnapshot(Rectangle TaskbarBounds, Rectangle AvailableArea, int Dpi,
     bool ShouldHide, string Detail, bool IsAvailable, DateTimeOffset CapturedAtUtc = default,
-    bool LayoutConfirmed = false, bool CanKeepPlacement = false)
+    bool LayoutConfirmed = false, bool CanKeepPlacement = false, bool Covered = false)
 {
+    // Covered: the shell has raised its taskbar above the desktop window band (Start menu,
+    // search, tray flyouts). Nothing in the desktop band can be drawn above it, but the
+    // layout itself is unchanged, so the last confirmed placement stays valid.
     internal TaskbarDockAnchors? Anchors { get; init; }
 }
 
@@ -127,6 +130,16 @@ public sealed class TaskbarDockMonitor : IDisposable
         }
     }
 
+    /// <summary>Asks the worker to sample again now instead of at the next interval, e.g. after a shell event.</summary>
+    public void RequestRefresh()
+    {
+        lock (_gate)
+        {
+            if (_disposed || !_enabled) return;
+            _wake.Set();
+        }
+    }
+
     private void WorkerLoop()
     {
         try
@@ -160,6 +173,13 @@ public sealed class TaskbarDockMonitor : IDisposable
                             _lastAvailable = next;
                             _lastAvailableAt = _publishedAt;
                         }
+                        else if (next.Covered && _lastAvailable is not null && next.Anchors == _lastAvailable.Anchors)
+                        {
+                            // The shell can keep its taskbar raised for many seconds after the Start
+                            // menu closes. Unchanged anchors mean the confirmed placement is still
+                            // valid, so keep it alive instead of letting the two-second window expire.
+                            _lastAvailableAt = _publishedAt;
+                        }
                     }
                 }
                 _wake.WaitOne(RefreshMilliseconds);
@@ -178,6 +198,9 @@ public sealed class TaskbarDockMonitor : IDisposable
         int dpi = anchors.Dpi;
         if (ShouldHideNow())
             return new(taskbar, Rectangle.Empty, dpi, true, "任务栏自动隐藏或当前程序处于全屏。", false, DateTimeOffset.UtcNow);
+        if (IsRaisedAboveDesktopBand(anchors.TaskbarWindow))
+            return new(taskbar, Rectangle.Empty, dpi, false, "任务栏暂时位于系统弹层之上（如开始菜单），保持已确认的位置。", false,
+                DateTimeOffset.UtcNow, Covered: true) { Anchors = anchors };
         if (taskbar.Width < taskbar.Height * 4 || taskbar.Height > monitor.Height / 3)
             return new(taskbar, Rectangle.Empty, dpi, false, "当前仅支持主屏幕的横向任务栏。", false,
                 DateTimeOffset.UtcNow, LayoutConfirmed: TaskbarLayout.IsFullyVisible(taskbar, monitor)) { Anchors = anchors };
@@ -306,16 +329,32 @@ public sealed class TaskbarDockMonitor : IDisposable
         return autoHide && (!TryBounds(taskbar, out Rectangle bounds) || !TaskbarLayout.IsFullyVisible(bounds, monitorBounds));
     }
 
-    private static nint FindChildByClass(nint parent, string className)
+    // FindWindowEx resolves by handle and keeps working while the taskbar sits in a raised
+    // window band; EnumChildWindows sees nothing there and would report a false anchor change.
+    private static nint FindChildByClass(nint parent, string className) =>
+        Native.FindWindowEx(parent, 0, className, null);
+
+    /// <summary>
+    /// Windows keeps the taskbar in the desktop band (1) normally and raises it into the Start
+    /// menu band while Start, search, or tray flyouts are open, often for seconds after they
+    /// close. GetWindowBand is exported by user32 since Windows 8 but not documented; fall back
+    /// to the observable effect that a raised window vanishes from top-level enumeration.
+    /// </summary>
+    private static bool IsRaisedAboveDesktopBand(nint taskbar)
     {
-        nint result = 0;
-        Native.EnumChildWindows(parent, (window, _) =>
+        try
         {
-            if (WindowClass(window) != className) return true;
-            result = window;
+            if (Native.GetWindowBand(taskbar, out uint band)) return band > 1;
+        }
+        catch (EntryPointNotFoundException) { /* Use the enumeration fallback below. */ }
+        bool enumerated = false;
+        Native.EnumWindows((window, _) =>
+        {
+            if (window != taskbar) return true;
+            enumerated = true;
             return false;
         }, 0);
-        return result;
+        return !enumerated && Native.IsWindow(taskbar);
     }
 
     private static string WindowClass(nint window)
@@ -378,7 +417,10 @@ public sealed class TaskbarDockMonitor : IDisposable
             public nint Parameter;
         }
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern nint FindWindow(string className, string? name);
-        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool EnumChildWindows(nint parent, WindowCallback callback, nint parameter);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern nint FindWindowEx(nint parent, nint after, string className, string? name);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool EnumWindows(WindowCallback callback, nint parameter);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool IsWindow(nint window);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetWindowBand(nint window, out uint band);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(nint window, StringBuilder value, int size);
         [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetWindowRect(nint window, out Rect rectangle);
         [DllImport("user32.dll")] internal static extern nint MonitorFromWindow(nint window, uint flags);
