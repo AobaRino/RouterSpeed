@@ -8,23 +8,21 @@ namespace RouterSpeed;
 /// <summary>A small desktop overlay. All rates supplied by the poller are bytes per second.</summary>
 public sealed class SpeedBarForm : Form
 {
-    private const int LogicalWidth = 360;
-    private const int LogicalHeight = 68;
-    private const int DockWidth = 160;
+    // Floating panel without a skin (TrafficMonitor proportions: two "label: value" rows).
+    private const int LogicalWidth = 270;
+    private const int LogicalHeight = 56;
+    private const int FloatingPadding = 5;
+    private const int DockWidth = 150;
     private const int DockHeight = 40;
     private static readonly Color Surface = Color.FromArgb(22, 27, 38);
     private static readonly Color Foreground = Color.FromArgb(237, 243, 252);
+    // Taskbar text is plain bright white on the dark taskbar; the opaque fallback matches its tone.
+    private static readonly Color CompactText = Color.FromArgb(242, 242, 242);
+    private static readonly Color CompactFallback = Color.FromArgb(24, 31, 40);
+    // Tray icon colours: cyan for direct, violet for proxy, grey while disconnected.
     private static readonly Color Muted = Color.FromArgb(130, 142, 161);
     private static readonly Color DirectColor = Color.FromArgb(88, 214, 215);
     private static readonly Color ProxyColor = Color.FromArgb(180, 152, 255);
-    // Rates below this are idle noise; they are drawn muted so active traffic stands out.
-    private const double IdleBytesPerSecond = 1024;
-    // The docked bar sits directly on the taskbar, so its palette follows the system (taskbar)
-    // theme rather than the floating bar's own dark surface.
-    private static readonly CompactPalette DarkTaskbar = new(Foreground, Muted, DirectColor, ProxyColor,
-        Color.FromArgb(233, 177, 92), Color.FromArgb(24, 31, 40));
-    private static readonly CompactPalette LightTaskbar = new(Color.FromArgb(28, 32, 40), Color.FromArgb(122, 130, 142),
-        Color.FromArgb(0, 128, 134), Color.FromArgb(104, 72, 208), Color.FromArgb(196, 120, 20), Color.FromArgb(243, 243, 243));
     private readonly Func<CancellationToken, Task<SpeedSnapshot>> _poll;
     private readonly Action? _configure;
     private readonly CancellationTokenSource _lifetime = new();
@@ -32,11 +30,12 @@ public sealed class SpeedBarForm : Form
     private readonly NotifyIcon _tray = new();
     private readonly GlobalHotkey _hotkey;
     private readonly StartupRegistration _startup = new();
-    private readonly Font _labelFont = new("Microsoft YaHei UI", 11.5f, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Font _rateFont = new("Segoe UI", 17f, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Font _arrowFont = new("Segoe UI", 15f, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Font _compactFont = new("Microsoft YaHei UI", 11.5f, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Font _compactRateFont = new("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font _floatingFont = new("Microsoft YaHei UI", 14f, FontStyle.Regular, GraphicsUnit.Pixel);
+    // One family for the whole taskbar bar keeps baselines aligned; Segoe UI Variable is the Windows 11 shell font.
+    private readonly Font _compactFont = new("Segoe UI Variable Display", 13f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font _compactLabelFont = new("Segoe UI Variable Display", 13f, FontStyle.Bold, GraphicsUnit.Pixel);
+    private readonly Image? _skin;
+    private readonly Color _skinTextColor;
     private readonly System.Windows.Forms.Timer _dockTimer = new() { Interval = 350 };
     private readonly TaskbarDockMonitor? _dockMonitor;
     private readonly TaskbarOrderObserver? _taskbarOrderObserver;
@@ -72,7 +71,6 @@ public sealed class SpeedBarForm : Form
     private bool _floatingTopMost;
     private Point _floatingLocation;
     private string _placementDetail = string.Empty;
-    private bool _lightTaskbar = SystemUsesLightTheme();
     // True while this form added WS_EX_LAYERED for the docked per-pixel-alpha surface. A
     // window that was already layered (e.g. Opacity in UI checks) is left alone.
     private bool _layeredByUs;
@@ -99,7 +97,8 @@ public sealed class SpeedBarForm : Form
         AccessibleRole = AccessibleRole.Indicator;
         AutoScaleDimensions = new SizeF(96, 96);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(LogicalWidth, LogicalHeight);
+        (_skin, _skinTextColor) = LoadSkin();
+        ClientSize = FloatingLogicalSize;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -252,62 +251,100 @@ public sealed class SpeedBarForm : Form
             PaintCompact(g, width, height);
             return;
         }
-        using var outline = RoundedRectangle(new RectangleF(.5f, .5f, width - 1, height - 1), 9);
-        using var border = new Pen(Color.FromArgb(62, 73, 91));
-        g.DrawPath(border, outline);
-        using var divider = new Pen(Color.FromArgb(40, 49, 65));
-        g.DrawLine(divider, 20, 34, width - 18, 34);
-        using var grip = new SolidBrush(Color.FromArgb(65, 78, 98));
-        for (int i = 0; i < 3; i++)
-            g.FillEllipse(grip, 7, 26 + i * 6, 2, 2);
-
-        PaintRow(g, HasUnclassifiedTraffic ? "直连*" : "直连", DirectColor, 7, _snapshot.DirectDown, _snapshot.DirectUp);
-        PaintRow(g, HasUnclassifiedTraffic ? "代理*" : "代理", ProxyColor, 36, _snapshot.ProxyDown, _snapshot.ProxyUp);
-        using var status = new SolidBrush(_snapshot.Connected && !HasUnclassifiedTraffic ? Color.FromArgb(115, 210, 151) : Color.FromArgb(233, 177, 92));
-        g.FillEllipse(status, width - 9, 7, 3, 3);
+        PaintFloating(g, width, height);
     }
 
     private bool HasUnclassifiedTraffic => _snapshot.Connected && _snapshot.Status.Contains("未分类", StringComparison.Ordinal);
 
-    private void PaintRow(Graphics g, string label, Color accent, float y, double down, double up)
+    // Floating mode follows the TrafficMonitor layout: a skinned panel with "label: value"
+    // cells. Without a skin file the panel is a dark rounded card.
+    private void PaintFloating(Graphics g, float width, float height)
     {
-        using var accentBrush = new SolidBrush(accent);
-        using var downBrush = new SolidBrush(ValueColor(down, Foreground, Muted));
-        using var upBrush = new SolidBrush(ValueColor(up, Foreground, Muted));
-        using var arrowBrush = new SolidBrush(_snapshot.Connected ? accent : Muted);
+        Color text = Foreground;
+        if (_skin is { } skin)
+        {
+            g.DrawImage(skin, new RectangleF(0, 0, width, height));
+            text = _skinTextColor;
+        }
+        else
+        {
+            using var outline = RoundedRectangle(new RectangleF(.5f, .5f, width - 1, height - 1), 9);
+            using var border = new Pen(Color.FromArgb(62, 73, 91));
+            g.DrawPath(border, outline);
+        }
+        float rowHeight = (height - 2 * FloatingPadding) / 2;
+        PaintFloatingRow(g, HasUnclassifiedTraffic ? "直连*:" : "直连:", FloatingPadding, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
+        PaintFloatingRow(g, HasUnclassifiedTraffic ? "代理*:" : "代理:", FloatingPadding + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
+        if (!_snapshot.Connected || HasUnclassifiedTraffic)
+        {
+            using var warning = new SolidBrush(Color.FromArgb(233, 177, 92));
+            g.FillEllipse(warning, width - 9, 5, 4, 4);
+        }
+    }
+
+    private void PaintFloatingRow(Graphics g, string label, float y, float height, double down, double up, Color text)
+    {
+        using var brush = new SolidBrush(text);
         using var format = new StringFormat(StringFormat.GenericTypographic)
         {
             FormatFlags = StringFormatFlags.NoWrap,
-            Alignment = StringAlignment.Far,
+            Alignment = StringAlignment.Near,
             LineAlignment = StringAlignment.Center
         };
-        g.DrawString(label, _labelFont, accentBrush, new PointF(21, y + 6));
-        g.DrawString("↓", _arrowFont, arrowBrush, new PointF(79, y + 2));
-        g.DrawString("↑", _arrowFont, arrowBrush, new PointF(215, y + 2));
-        g.DrawString(FormatRate(down, _snapshot.Connected), _rateFont, downBrush, new RectangleF(96, y, 108, 25), format);
-        g.DrawString(FormatRate(up, _snapshot.Connected), _rateFont, upBrush, new RectangleF(232, y, 108, 25), format);
+        float middle = y + height / 2;
+        g.DrawString(label, _floatingFont, brush, new RectangleF(12, y, 60, height), format);
+        DrawArrow(g, brush, 62, middle, down: true);
+        g.DrawString(FormatRate(down, _snapshot.Connected), _floatingFont, brush, new RectangleF(73, y, 90, height), format);
+        DrawArrow(g, brush, 165, middle, down: false);
+        g.DrawString(FormatRate(up, _snapshot.Connected), _floatingFont, brush, new RectangleF(176, y, 90, height), format);
     }
 
-    private Color ValueColor(double bytesPerSecond, Color active, Color idle) =>
-        _snapshot.Connected && bytesPerSecond >= IdleBytesPerSecond ? active : idle;
-
-    private CompactPalette Palette => _lightTaskbar ? LightTaskbar : DarkTaskbar;
-
+    // Taskbar mode: two rows of plain bright text, one letter per class, a squat triangle
+    // glued to each value. Everything shares one font so baselines line up.
     private void PaintCompact(Graphics g, float width, float height)
     {
-        CompactPalette palette = Palette;
-        PaintCompactRow(g, "直连", palette.Direct, 0, width, height / 2, _snapshot.DirectDown, _snapshot.DirectUp);
-        PaintCompactRow(g, "代理", palette.Proxy, height / 2, width, height / 2, _snapshot.ProxyDown, _snapshot.ProxyUp);
+        PaintCompactRow(g, "D", 0, height / 2, _snapshot.DirectDown, _snapshot.DirectUp);
+        PaintCompactRow(g, "P", height / 2, height / 2, _snapshot.ProxyDown, _snapshot.ProxyUp);
         if (!_snapshot.Connected || HasUnclassifiedTraffic)
         {
-            using var warning = new SolidBrush(palette.Warning);
+            using var warning = new SolidBrush(Color.FromArgb(233, 177, 92));
             g.FillEllipse(warning, width - 4, 2, 3, 3);
         }
     }
 
+    private void PaintCompactRow(Graphics g, string label, float y, float height, double down, double up)
+    {
+        using var brush = new SolidBrush(CompactText);
+        using var format = new StringFormat(StringFormat.GenericTypographic)
+        {
+            FormatFlags = StringFormatFlags.NoWrap,
+            Alignment = StringAlignment.Near,
+            LineAlignment = StringAlignment.Center
+        };
+        float middle = y + height / 2;
+        g.DrawString(label, _compactLabelFont, brush, new RectangleF(5, y, 14, height), format);
+        DrawArrow(g, brush, 19, middle, down: true);
+        g.DrawString(FormatCompactRate(down, _snapshot.Connected), _compactFont, brush, new RectangleF(28, y, 56, height), format);
+        DrawArrow(g, brush, 84, middle, down: false);
+        g.DrawString(FormatCompactRate(up, _snapshot.Connected), _compactFont, brush, new RectangleF(93, y, 56, height), format);
+    }
+
+    /// <summary>A squat filled triangle (7×5 logical px) reads as up/down at small sizes better than a text arrow.</summary>
+    private static void DrawArrow(Graphics g, Brush brush, float left, float middle, bool down)
+    {
+        const float w = 7, h = 5;
+        float top = middle - h / 2, bottom = middle + h / 2;
+        PointF[] points = down
+            ? [new(left, top), new(left + w, top), new(left + w / 2, bottom)]
+            : [new(left, bottom), new(left + w, bottom), new(left + w / 2, top)];
+        g.FillPolygon(brush, points);
+    }
+
     /// <summary>
     /// Draws the docked bar onto a per-pixel-alpha surface so only the text sits on the
-    /// taskbar's own material. The background keeps alpha 1 so the whole bar stays clickable.
+    /// taskbar material. ClearType needs an opaque background, so the text is rendered over
+    /// the taskbar colour sampled next to the bar and every pixel the text touched is then
+    /// made opaque; untouched pixels keep alpha 1 so the whole bar stays clickable.
     /// Returns false when the window is not ours to layer, leaving the opaque OnPaint path.
     /// </summary>
     private bool RenderLayered()
@@ -315,26 +352,30 @@ public sealed class SpeedBarForm : Form
         if (!_isDocked || !_layeredByUs || !IsHandleCreated || IsDisposed || ClientSize.Width <= 0 || ClientSize.Height <= 0)
             return false;
         float scale = DeviceDpi / 96f;
-        using var surface = new Bitmap(ClientSize.Width, ClientSize.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        int width = ClientSize.Width, height = ClientSize.Height;
+        nint screen = GetDC(0);
+        Color backdrop = SampleBackdrop(screen);
+        using var surface = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
         using (Graphics g = Graphics.FromImage(surface))
         {
-            g.Clear(Color.FromArgb(1, 0, 0, 0));
+            g.Clear(backdrop);
             g.ScaleTransform(scale, scale);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            // ClearType needs an opaque background; grayscale antialiasing composes correctly over alpha.
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            PaintCompact(g, ClientSize.Width / scale, ClientSize.Height / scale);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            PaintCompact(g, width / scale, height / scale);
         }
-        nint screen = GetDC(0);
+        KeyOutBackdrop(surface, backdrop);
         nint memory = CreateCompatibleDC(screen);
         nint bitmap = surface.GetHbitmap(Color.FromArgb(0));
         nint previous = SelectObject(memory, bitmap);
         try
         {
-            var size = new NativeSize(ClientSize.Width, ClientSize.Height);
+            var size = new NativeSize(width, height);
             var origin = new NativePoint(0, 0);
             var blend = new BlendFunction { BlendOp = 0, Flags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
-            return UpdateLayeredWindow(Handle, screen, 0, ref size, memory, ref origin, 0, ref blend, 2);
+            bool updated = UpdateLayeredWindow(Handle, screen, 0, ref size, memory, ref origin, 0, ref blend, 2);
+            if (!updated) StartupTrace.Write("layered-update-failed 0x" + Marshal.GetLastWin32Error().ToString("X"));
+            return updated;
         }
         finally
         {
@@ -343,6 +384,38 @@ public sealed class SpeedBarForm : Form
             DeleteDC(memory);
             ReleaseDC(0, screen);
         }
+    }
+
+    // The taskbar material is uniform enough next to the bar that one pixel just outside its
+    // left edge stands in for the whole background. Falls back to the known dark taskbar tone.
+    private Color SampleBackdrop(nint screen)
+    {
+        uint value = GetPixel(screen, Left - 2, Top + 2);
+        if (value == 0xFFFFFFFF) return CompactFallback;
+        return Color.FromArgb((int)(value & 0xFF), (int)((value >> 8) & 0xFF), (int)((value >> 16) & 0xFF));
+    }
+
+    private static void KeyOutBackdrop(Bitmap surface, Color backdrop)
+    {
+        var bounds = new Rectangle(0, 0, surface.Width, surface.Height);
+        var data = surface.LockBits(bounds, System.Drawing.Imaging.ImageLockMode.ReadWrite, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            int length = data.Stride * data.Height;
+            byte[] pixels = new byte[length];
+            Marshal.Copy(data.Scan0, pixels, 0, length);
+            for (int offset = 0; offset < length; offset += 4)
+            {
+                if (pixels[offset] == backdrop.B && pixels[offset + 1] == backdrop.G && pixels[offset + 2] == backdrop.R)
+                {
+                    pixels[offset] = pixels[offset + 1] = pixels[offset + 2] = 0;
+                    pixels[offset + 3] = 1;
+                }
+                else pixels[offset + 3] = 255;
+            }
+            Marshal.Copy(pixels, 0, data.Scan0, length);
+        }
+        finally { surface.UnlockBits(data); }
     }
 
     private void Repaint()
@@ -374,33 +447,6 @@ public sealed class SpeedBarForm : Form
         }
     }
 
-    private static bool SystemUsesLightTheme()
-    {
-        try
-        {
-            return Microsoft.Win32.Registry.GetValue(
-                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                "SystemUsesLightTheme", 0) is int value && value != 0;
-        }
-        catch { return false; }
-    }
-
-    protected override void WndProc(ref Message m)
-    {
-        // WM_SETTINGCHANGE "ImmersiveColorSet" and WM_THEMECHANGED follow the taskbar theme.
-        if (m.Msg is 0x001A or 0x031A)
-        {
-            bool light = SystemUsesLightTheme();
-            if (light != _lightTaskbar)
-            {
-                _lightTaskbar = light;
-                if (_isDocked) BackColor = Palette.Fallback;
-                Repaint();
-            }
-        }
-        base.WndProc(ref m);
-    }
-
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
@@ -408,27 +454,40 @@ public sealed class SpeedBarForm : Form
         if (_isDocked) ApplyDockedSurface();
     }
 
-    private sealed record CompactPalette(Color Foreground, Color Muted, Color Direct, Color Proxy, Color Warning, Color Fallback);
-
-    private void PaintCompactRow(Graphics g, string label, Color accent, float y, float width, float height, double down, double up)
+    /// <summary>
+    /// Optional TrafficMonitor-style skin: a PNG next to the executable or in the local
+    /// application data folder. Its pixel size becomes the floating panel's logical size, and
+    /// the text colour is chosen from the skin's brightness so dark and light skins both read.
+    /// </summary>
+    private static (Image? Skin, Color Text) LoadSkin()
     {
-        CompactPalette palette = Palette;
-        using var accentBrush = new SolidBrush(accent);
-        using var downBrush = new SolidBrush(ValueColor(down, palette.Foreground, palette.Muted));
-        using var upBrush = new SolidBrush(ValueColor(up, palette.Foreground, palette.Muted));
-        using var format = new StringFormat(StringFormat.GenericTypographic)
+        foreach (string directory in new[] { AppContext.BaseDirectory, Path.GetDirectoryName(PreferencesPath)! })
         {
-            FormatFlags = StringFormatFlags.NoWrap,
-            Alignment = StringAlignment.Near,
-            LineAlignment = StringAlignment.Center
-        };
-        g.DrawString(label, _compactFont, accentBrush, new RectangleF(5, y, 28, height), format);
-        g.DrawString("↓", _compactRateFont, accentBrush, new RectangleF(35, y, 10, height), format);
-        g.DrawString("↑", _compactRateFont, accentBrush, new RectangleF(98, y, 10, height), format);
-        format.Alignment = StringAlignment.Far;
-        g.DrawString(FormatCompactRate(down, _snapshot.Connected), _compactRateFont, downBrush, new RectangleF(45, y, 48, height), format);
-        g.DrawString(FormatCompactRate(up, _snapshot.Connected), _compactRateFont, upBrush, new RectangleF(108, y, width - 114, height), format);
+            string path = Path.Combine(directory, "skin.png");
+            if (!File.Exists(path)) continue;
+            try
+            {
+                using var stream = File.OpenRead(path);
+                using var loaded = Image.FromStream(stream);
+                if (loaded.Width < 120 || loaded.Height < 32 || loaded.Width > 1200 || loaded.Height > 400) continue;
+                var skin = new Bitmap(loaded);
+                using var probe = new Bitmap(skin, new Size(16, 4));
+                double luminance = 0;
+                for (int x = 0; x < 12; x++)
+                    for (int y = 0; y < 4; y++)
+                    {
+                        Color c = probe.GetPixel(x, y);
+                        luminance += (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) * c.A / 255;
+                    }
+                bool bright = luminance / 48 > 140;
+                return (skin, bright ? Color.FromArgb(28, 28, 28) : Foreground);
+            }
+            catch { /* An unreadable skin means the default panel. */ }
+        }
+        return (null, Foreground);
     }
+
+    private Size FloatingLogicalSize => _skin is { } skin ? skin.Size : new Size(LogicalWidth, LogicalHeight);
 
     internal static string FormatCompactRate(double bytesPerSecond, bool connected = true)
     {
@@ -442,7 +501,7 @@ public sealed class SpeedBarForm : Form
             unit++;
         }
         if (bytesPerSecond >= 999.5) return "999T+";
-        return bytesPerSecond.ToString(unit == 0 || bytesPerSecond >= 99.95 ? "0" : "0.0", CultureInfo.InvariantCulture) + units[unit];
+        return bytesPerSecond.ToString(unit == 0 || bytesPerSecond >= 99.95 ? "0" : "0.0", CultureInfo.InvariantCulture) + " " + units[unit];
     }
 
     internal static string FormatRate(double bytesPerSecond, bool connected = true)
@@ -618,7 +677,7 @@ public sealed class SpeedBarForm : Form
             {
                 bool changed = !_isDocked;
                 _isDocked = true;
-                if (BackColor != Palette.Fallback) BackColor = Palette.Fallback;
+                if (BackColor != CompactFallback) BackColor = CompactFallback;
                 if (!TopMost) TopMost = true;
                 bool moved = Bounds != dockBounds;
                 if (moved) Bounds = dockBounds;
@@ -669,7 +728,8 @@ public sealed class SpeedBarForm : Form
         _isDocked = false;
         BackColor = Surface;
         if (TopMost != _floatingTopMost) TopMost = _floatingTopMost;
-        Size target = new((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
+        Size logical = FloatingLogicalSize;
+        Size target = new((int)Math.Round(logical.Width * DeviceDpi / 96f), (int)Math.Round(logical.Height * DeviceDpi / 96f));
         if (ClientSize != target) ClientSize = target;
         if (wasDocked || Location != _floatingLocation) Location = _floatingLocation;
         ClampToWorkArea();
@@ -781,8 +841,8 @@ public sealed class SpeedBarForm : Form
     {
         Rectangle area = (Screen.PrimaryScreen ?? Screen.FromPoint(Cursor.Position)).WorkingArea;
         int margin = (int)Math.Round(12 * DeviceDpi / 96f);
-        int width = (int)Math.Round(LogicalWidth * DeviceDpi / 96f);
-        int height = (int)Math.Round(LogicalHeight * DeviceDpi / 96f);
+        int width = (int)Math.Round(FloatingLogicalSize.Width * DeviceDpi / 96f);
+        int height = (int)Math.Round(FloatingLogicalSize.Height * DeviceDpi / 96f);
         _floatingLocation = new Point(area.Right - width - margin, area.Bottom - height - margin);
         if (!_isDocked) Location = _floatingLocation;
     }
@@ -860,11 +920,10 @@ public sealed class SpeedBarForm : Form
             _trayIcon?.Dispose();
             _hotkey.Dispose();
             _menu.Dispose();
-            _labelFont.Dispose();
-            _rateFont.Dispose();
-            _arrowFont.Dispose();
+            _floatingFont.Dispose();
+            _compactLabelFont.Dispose();
+            _skin?.Dispose();
             _compactFont.Dispose();
-            _compactRateFont.Dispose();
             // The poller may still be unwinding its cancellation; keep its token source alive
             // until then so implementations can safely register cancellation while exiting.
             if (_pollTask is null || _pollTask.IsCompleted) _lifetime.Dispose();
@@ -892,6 +951,7 @@ public sealed class SpeedBarForm : Form
     private static extern bool UpdateLayeredWindow(nint window, nint destination, nint destinationPoint, ref NativeSize size,
         nint source, ref NativePoint sourcePoint, uint colorKey, ref BlendFunction blend, uint flags);
     [DllImport("gdi32.dll")] private static extern nint CreateCompatibleDC(nint dc);
+    [DllImport("gdi32.dll")] private static extern uint GetPixel(nint dc, int x, int y);
     [DllImport("gdi32.dll")] private static extern nint SelectObject(nint dc, nint handle);
     [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(nint handle);
     [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteDC(nint dc);

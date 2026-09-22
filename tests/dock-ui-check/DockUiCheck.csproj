@@ -11,6 +11,7 @@
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
     <Compile Include="../../SpeedBarForm.cs" Link="SpeedBarForm.cs" />
     <Compile Include="../../SpeedSnapshot.cs" Link="SpeedSnapshot.cs" />
+    <Compile Include="../../StartupTrace.cs" Link="StartupTrace.cs" />
     <Compile Include="../../GlobalHotkey.cs" Link="GlobalHotkey.cs" />
     <Compile Include="../../ShortcutDefinition.cs" Link="ShortcutDefinition.cs" />
     <Compile Include="../../HotkeySettingsForm.cs" Link="HotkeySettingsForm.cs" />

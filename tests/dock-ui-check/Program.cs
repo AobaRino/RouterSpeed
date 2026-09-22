@@ -334,7 +334,7 @@ internal static partial class Program
         foreach (int dpi in new[] { 32, 48, 72, 96, 120, 144, 192, 240, 288, 480, 600, 768, 900 })
         {
             float scale = Math.Clamp(dpi, 48, 768) / 96f;
-            int expectedWidth = (int)Math.Round(160 * scale);
+            int expectedWidth = (int)Math.Round(150 * scale);
             int minHeight = (int)Math.Round(30 * scale);
             h.Snapshot = AvailableSnapshot(dpi, expectedWidth, minHeight); h.Refresh(); h.Settle(700);
             Check(Field<bool>(h.Bar, "_isDocked"), $"Minimum accepted space rejected at DPI {dpi}.");
