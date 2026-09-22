@@ -1,0 +1,3 @@
+LIBRARY RouterSpeedPlugin
+EXPORTS
+    TMPluginGetInstance
