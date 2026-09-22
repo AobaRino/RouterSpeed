@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -241,12 +240,11 @@ func (t *logTail) poll(consume func(string)) error {
 			data := t.partial + string(buffer[:n])
 			last := strings.LastIndexByte(data, '\n')
 			if last >= 0 {
-				scanner := bufio.NewScanner(strings.NewReader(data[:last+1]))
-				scanner.Buffer(make([]byte, 4096), 128*1024)
-				for scanner.Scan() {
-					line := scanner.Text()
+				// Split rather than bufio.Scanner: one overlong line must not stop
+				// the rest of the chunk from being read.
+				for _, line := range strings.Split(data[:last], "\n") {
 					if !strings.HasPrefix(line, "\x00") {
-						consume(line)
+						consume(strings.TrimSuffix(line, "\r"))
 					}
 				}
 				t.partial = data[last+1:]

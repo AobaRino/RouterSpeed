@@ -42,10 +42,9 @@ return view.extend({
 		let previous = null;
 		let previousRates = null;
 		let credential = null;
-		let currentClient = config.client;
 		const statusLabel = E('span', { class: 'rs-status' }, '连接中');
 		const sampleLabel = E('span', { class: 'rs-muted' }, '等待采样');
-		const scopeLabel = E('span', { class: 'rs-scope' }, '本机 ' + currentClient);
+		const scopeLabel = E('span', { class: 'rs-scope' }, '本机 ' + config.client);
 		const lossLabel = E('span', {}, '—');
 		const summaryLabel = E('p', { class: 'rs-muted' });
 		const endpoint = E('input', { type: 'text', readonly: true, class: 'cbi-input-text', value: location.origin + '/cgi-bin/router-speed' });
@@ -141,7 +140,6 @@ return view.extend({
 			}
 			const result = await callSave(enabled.checked, address, iface.value);
 			if (!result.ok) { notify('保存失败。请确认本机 IP 和采集接口有效。', true); return; }
-			currentClient = address;
 			credential = null; token.value = ''; token.type = 'password';
 			previous = null; previousRates = null;
 			credentialStatus.textContent = '设置已更新，请重新导出 Windows 连接配置';

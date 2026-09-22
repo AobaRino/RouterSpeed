@@ -7,13 +7,12 @@ namespace RouterSpeed;
 
 /// <summary>
 /// A small desktop panel in the TrafficMonitor style: two "label: value" rows on a dark
-/// semi-transparent plate with square corners, or an optional skin image. It can be dragged, locked in place, kept on top,
-/// hidden with a shortcut, and it never touches the taskbar. All rates supplied by the
+/// semi-transparent plate with square corners. It can be dragged, locked in place, kept on
+/// top, hidden with a shortcut, and it never touches the taskbar. All rates supplied by the
 /// poller are bytes per second.
 /// </summary>
 public sealed class SpeedBarForm : Form
 {
-    // Panel without a skin (TrafficMonitor proportions: two rows).
     private const int LogicalWidth = 270;
     private const int LogicalHeight = 56;
     private const int Inset = 5;
@@ -36,8 +35,6 @@ public sealed class SpeedBarForm : Form
     private readonly GlobalHotkey _hotkey;
     private readonly StartupRegistration _startup = new();
     private readonly Font _font = new("Microsoft YaHei UI", 14f, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Image? _skin;
-    private readonly Color _skinTextColor;
     private readonly string _preferencesPath;
     private readonly ToolStripMenuItem _topmostItem;
     private readonly ToolStripMenuItem _lockItem;
@@ -77,8 +74,7 @@ public sealed class SpeedBarForm : Form
         AccessibleRole = AccessibleRole.Indicator;
         AutoScaleDimensions = new SizeF(96, 96);
         AutoScaleMode = AutoScaleMode.Dpi;
-        (_skin, _skinTextColor) = LoadSkin();
-        ClientSize = LogicalSize;
+        ClientSize = new Size(LogicalWidth, LogicalHeight);
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -241,26 +237,13 @@ public sealed class SpeedBarForm : Form
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         float width = ClientSize.Width / scale;
         float height = ClientSize.Height / scale;
-        Color text = Foreground;
-        if (_skin is { } skin)
-        {
-            g.DrawImage(skin, new RectangleF(0, 0, width, height));
-            text = _skinTextColor;
-        }
-        else
-        {
-            using var border = new Pen(Edge);
-            g.DrawRectangle(border, .5f, .5f, width - 1, height - 1);
-        }
+        using var edge = new Pen(Edge);
+        g.DrawRectangle(edge, .5f, .5f, width - 1, height - 1);
         // A disconnected panel greys out completely instead of showing a warning marker.
-        if (!_snapshot.Connected) text = Muted;
+        Color text = _snapshot.Connected ? Foreground : Muted;
         float rowHeight = (height - 2 * Inset) / 2;
         PaintRow(g, HasUnclassifiedTraffic ? "直连*:" : "直连:", Inset, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
-        if (_skin is null)
-        {
-            using var divider = new Pen(Edge);
-            g.DrawLine(divider, 8, Inset + rowHeight, width - 8, Inset + rowHeight);
-        }
+        g.DrawLine(edge, 8, Inset + rowHeight, width - 8, Inset + rowHeight);
         PaintRow(g, HasUnclassifiedTraffic ? "代理*:" : "代理:", Inset + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
     }
 
@@ -291,41 +274,6 @@ public sealed class SpeedBarForm : Form
             : [new(left, bottom), new(left + w, bottom), new(left + w / 2, top)];
         g.FillPolygon(brush, points);
     }
-
-    /// <summary>
-    /// Optional TrafficMonitor-style skin: a PNG next to the executable or in the local
-    /// application data folder. Its pixel size becomes the panel's logical size, and the text
-    /// colour is chosen from the skin's brightness so dark and light skins both read.
-    /// </summary>
-    private static (Image? Skin, Color Text) LoadSkin()
-    {
-        foreach (string directory in new[] { AppContext.BaseDirectory, Path.GetDirectoryName(PreferencesPath)! })
-        {
-            string path = Path.Combine(directory, "skin.png");
-            if (!File.Exists(path)) continue;
-            try
-            {
-                using var stream = File.OpenRead(path);
-                using var loaded = Image.FromStream(stream);
-                if (loaded.Width < 120 || loaded.Height < 32 || loaded.Width > 1200 || loaded.Height > 400) continue;
-                var skin = new Bitmap(loaded);
-                using var probe = new Bitmap(skin, new Size(16, 4));
-                double luminance = 0;
-                for (int x = 0; x < 12; x++)
-                    for (int y = 0; y < 4; y++)
-                    {
-                        Color c = probe.GetPixel(x, y);
-                        luminance += (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) * c.A / 255;
-                    }
-                bool bright = luminance / 48 > 140;
-                return (skin, bright ? Color.FromArgb(28, 28, 28) : Foreground);
-            }
-            catch { /* An unreadable skin means the default panel. */ }
-        }
-        return (null, Foreground);
-    }
-
-    private Size LogicalSize => _skin is { } skin ? skin.Size : new Size(LogicalWidth, LogicalHeight);
 
     internal static string FormatRate(double bytesPerSecond, bool connected = true)
     {
@@ -387,8 +335,7 @@ public sealed class SpeedBarForm : Form
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
-        Size logical = LogicalSize;
-        ClientSize = new Size((int)Math.Round(logical.Width * DeviceDpi / 96f), (int)Math.Round(logical.Height * DeviceDpi / 96f));
+        ClientSize = new Size((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
         Invalidate();
     }
 
@@ -447,8 +394,8 @@ public sealed class SpeedBarForm : Form
     private void UpdateDetailValues()
     {
         string[] lines = [
-            $"直连  ↓ {FormatRate(_snapshot.DirectDown, _snapshot.Connected)}   ↑ {FormatRate(_snapshot.DirectUp, _snapshot.Connected)}",
-            $"代理  ↓ {FormatRate(_snapshot.ProxyDown, _snapshot.Connected)}   ↑ {FormatRate(_snapshot.ProxyUp, _snapshot.Connected)}",
+            $"直连  ▼ {FormatRate(_snapshot.DirectDown, _snapshot.Connected)}   ▲ {FormatRate(_snapshot.DirectUp, _snapshot.Connected)}",
+            $"代理  ▼ {FormatRate(_snapshot.ProxyDown, _snapshot.Connected)}   ▲ {FormatRate(_snapshot.ProxyUp, _snapshot.Connected)}",
             .. _snapshot.Detail.Split('\n', StringSplitOptions.RemoveEmptyEntries).SelectMany(WrapMenuLine),
             HasUnclassifiedTraffic ? "* 仅显示已确认的直连和代理流量。" : "只统计这台 Windows 电脑的 IPv4 公网流量。",
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
@@ -579,7 +526,6 @@ public sealed class SpeedBarForm : Form
             _hotkey.Dispose();
             _menu.Dispose();
             _font.Dispose();
-            _skin?.Dispose();
             // The poller may still be unwinding its cancellation; keep its token source alive
             // until then so implementations can safely register cancellation while exiting.
             if (_pollTask is null || _pollTask.IsCompleted) _lifetime.Dispose();

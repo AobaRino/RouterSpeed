@@ -94,20 +94,33 @@ func command(path string, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-func loadConfig() (config, error) {
-	var c config
-	values := make([]string, 3)
+// readConfig returns the stored UCI values as they are. A missing option reads as
+// empty and the error reports the first failure, so LuCI can still show and repair
+// a hand-edited or partially missing configuration.
+func readConfig() (config, error) {
+	var values [3]string
+	var first error
 	for i, option := range []string{"enabled", "client", "interface"} {
 		b, err := command("/sbin/uci", "-q", "get", "router_speed.main."+option)
 		if err != nil {
-			return c, err
+			if first == nil {
+				first = err
+			}
+			continue
 		}
 		values[i] = strings.TrimSpace(string(b))
 	}
-	if values[0] != "0" && values[0] != "1" {
-		return c, errors.New("invalid enabled setting")
+	if first == nil && values[0] != "0" && values[0] != "1" {
+		first = errors.New("invalid enabled setting")
 	}
-	c = config{Enabled: values[0] == "1", Client: values[1], Interface: values[2]}
+	return config{Enabled: values[0] == "1", Client: values[1], Interface: values[2]}, first
+}
+
+func loadConfig() (config, error) {
+	c, err := readConfig()
+	if err != nil {
+		return c, err
+	}
 	return c, validateConfig(c)
 }
 
@@ -233,9 +246,6 @@ func saveConfig(c config) error {
 		return err
 	}
 	defer unlock()
-	if _, err := loadConfig(); err != nil {
-		return err
-	}
 	enabled := "0"
 	if c.Enabled {
 		enabled = "1"
@@ -282,14 +292,17 @@ func rpc(args []string, in io.Reader, out io.Writer) error {
 	if len(args) != 2 || args[0] != "call" {
 		return errors.New("invalid RPC invocation")
 	}
-	c, err := loadConfig()
-	if err != nil {
-		return err
-	}
+	// Only status and credentials need a valid stored configuration. Viewing and saving
+	// must keep working when it is broken, or LuCI could never repair it.
 	switch args[1] {
 	case "status":
+		c, err := loadConfig()
+		if err != nil {
+			return enc.Encode(status{SampleAgeMS: -1, Error: "collector configuration is invalid"})
+		}
 		return enc.Encode(readStatus(c, statePath, time.Now()))
 	case "config":
+		c, _ := readConfig()
 		return enc.Encode(describeConfig(c))
 	case "save":
 		var request struct {
@@ -309,6 +322,10 @@ func rpc(args []string, in io.Reader, out io.Writer) error {
 		}
 		return enc.Encode(map[string]any{"ok": true, "config": describeConfig(next)})
 	case "credentials", "rotate_token":
+		c, err := loadConfig()
+		if err != nil {
+			return err
+		}
 		var token string
 		if args[1] == "rotate_token" {
 			unlock, err := lockManagement()

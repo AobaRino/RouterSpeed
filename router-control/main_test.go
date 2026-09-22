@@ -209,3 +209,28 @@ func TestAPIOnlyExposesFreshCountersToAuthorizedClient(t *testing.T) {
 		t.Fatal("configuration failure was not sanitized")
 	}
 }
+
+// Without a readable UCI configuration (no /sbin/uci here), LuCI must still be able to
+// load the page: config returns what it could read and status reports the problem.
+func TestRPCViewingSurvivesUnreadableConfig(t *testing.T) {
+	var out strings.Builder
+	if err := rpc([]string{"call", "config"}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("config failed: %v", err)
+	}
+	var info configInfo
+	if err := json.Unmarshal([]byte(out.String()), &info); err != nil || info.Enabled || info.Client != "" {
+		t.Fatalf("unexpected config reply %q", out.String())
+	}
+	out.Reset()
+	if err := rpc([]string{"call", "status"}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	var s status
+	if err := json.Unmarshal([]byte(out.String()), &s); err != nil || s.Available || s.Error == "" {
+		t.Fatalf("unexpected status reply %q", out.String())
+	}
+	out.Reset()
+	if err := rpc([]string{"call", "credentials"}, strings.NewReader(""), &out); err == nil {
+		t.Fatal("credentials must still require a valid configuration")
+	}
+}

@@ -190,7 +190,7 @@ public sealed class RateCalculator
         double uu = (next.UnknownUp - prev.UnknownUp) / seconds;
         bool incomplete = ud + uu > 0 || next.DroppedPackets > prev.DroppedPackets;
         string status = incomplete ? "部分流量未分类 · IPv4" : "已连接 · IPv4";
-        detail += $"\n当前未分类：↓ {ud / 1024:0.0} KB/s  ↑ {uu / 1024:0.0} KB/s" +
+        detail += $"\n当前未分类：▼ {ud / 1024:0.0} KB/s  ▲ {uu / 1024:0.0} KB/s" +
             $"\n采集期间累计丢包：{next.DroppedPackets}。日志缺失或统计重连可能使分类不完整。";
         return _lastSnapshot = new(dd, du, pd, pu, status, detail, true);
     }

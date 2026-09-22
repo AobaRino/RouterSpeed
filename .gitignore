@@ -19,18 +19,18 @@ ui.json
 *.pfx
 *.p12
 router-speed-connection*.json
+# The LuCI export is saved as RouterSpeed-connection.json and contains the token.
+RouterSpeed-connection*.json
 router-speed-credentials*.json
 router-files/etc/router-speed/
 # Machine-specific deployment notes and one-time migration scripts
 /VERIFICATION.md
 /install-menu.sh
 /remove-old-monitor.sh
-# Generated diagnostics and test output
+# Generated diagnostics
 *.log
 *.jsonl
-artifacts/
-**/results.json
-**/*-results.json
+diagnostics.json
 collector/.cache/
 collector/router-speed-collector
 router-control/.cache/

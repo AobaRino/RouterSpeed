@@ -135,3 +135,19 @@ func TestLogTailPartialWritesTruncationAndRotation(t *testing.T) {
 		t.Fatal("rotation replayed or lost complete lines")
 	}
 }
+
+func TestLogTailKeepsLinesAfterAnOverlongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("A", 150000)+"\nafter\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tail := &logTail{path: path}
+	defer tail.close()
+	var last string
+	if err := tail.poll(func(line string) { last = line }); err != nil {
+		t.Fatal(err)
+	}
+	if last != "after" {
+		t.Fatalf("line after an overlong line was dropped; last = %.20q", last)
+	}
+}

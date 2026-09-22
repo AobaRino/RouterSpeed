@@ -60,7 +60,7 @@ internal static class Program
                 JsonSerializer.Serialize(samples, new JsonSerializerOptions { WriteIndented = true }));
             return 0;
         }
-        using var singleton = new Mutex(true, "Local\\RouterSpeed-192.168.233.1", out bool first);
+        using var singleton = new Mutex(true, "Local\\RouterSpeed", out bool first);
         if (!first)
         {
             StartupTrace.Write("existing-instance");

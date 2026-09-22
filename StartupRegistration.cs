@@ -1,4 +1,3 @@
-using Microsoft.Win32;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.AccessControl;
@@ -9,8 +8,6 @@ namespace RouterSpeed;
 /// <summary>Manages one Task Scheduler logon task for the current interactive Windows user.</summary>
 public sealed class StartupRegistration
 {
-    private const string DefaultRunSubKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string DefaultValueName = "RouterSpeed";
     private const int InteractiveToken = 3;
     private const int CreateOrUpdate = 6;
     private const int LogonTrigger = 9;
@@ -20,39 +17,13 @@ public sealed class StartupRegistration
     private readonly string _executablePath;
     private readonly string _workingDirectory;
     private readonly string _userSid;
-    private readonly RegistryKey _legacyRoot;
-    private readonly string _legacyRunSubKey;
-    private readonly string _legacyValueName;
 
-    public StartupRegistration() : this(CurrentUserSid(), Application.ExecutablePath) { }
-
-    private StartupRegistration(string userSid, string executablePath)
-        : this("RouterSpeed-" + userSid, executablePath, userSid,
-            Registry.CurrentUser, DefaultRunSubKey, DefaultValueName) { }
-
-    /// <summary>Tests supply a unique temporary task name and isolated legacy registry key; root remains caller-owned.</summary>
-    internal StartupRegistration(string taskName, string executablePath, string userSid,
-        RegistryKey legacyRoot, string legacyRunSubKey, string legacyValueName)
+    public StartupRegistration()
     {
-        if (string.IsNullOrWhiteSpace(taskName) || taskName.Length > 200 || taskName.IndexOfAny(['\\', '/']) >= 0 || taskName.Any(char.IsControl))
-            throw new ArgumentException("必须指定本用户专属的有效任务名称。", nameof(taskName));
-        if (string.IsNullOrWhiteSpace(executablePath) || !Path.IsPathFullyQualified(executablePath) ||
-            executablePath.Any(char.IsControl) || executablePath.Contains('"'))
-            throw new ArgumentException("启动程序必须使用不含参数的绝对 EXE 路径。", nameof(executablePath));
-        string fullPath = Path.GetFullPath(executablePath);
-        if (!string.Equals(Path.GetExtension(fullPath), ".exe", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("启动程序必须是 EXE 文件。", nameof(executablePath));
-        _userSid = new SecurityIdentifier(userSid).Value;
-        if (!string.Equals(_userSid, CurrentUserSid(), StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("开机启动任务只能使用当前 Windows 用户。", nameof(userSid));
-        _legacyRoot = legacyRoot ?? throw new ArgumentNullException(nameof(legacyRoot));
-        if (string.IsNullOrWhiteSpace(legacyRunSubKey)) throw new ArgumentException("必须指定旧启动设置子键。", nameof(legacyRunSubKey));
-        if (string.IsNullOrWhiteSpace(legacyValueName)) throw new ArgumentException("必须指定本程序的旧启动项名称。", nameof(legacyValueName));
-        _taskName = taskName;
-        _executablePath = fullPath;
-        _workingDirectory = Path.GetDirectoryName(fullPath)!;
-        _legacyRunSubKey = legacyRunSubKey;
-        _legacyValueName = legacyValueName;
+        _userSid = CurrentUserSid();
+        _taskName = "RouterSpeed-" + _userSid;
+        _executablePath = Path.GetFullPath(Application.ExecutablePath);
+        _workingDirectory = Path.GetDirectoryName(_executablePath)!;
     }
 
     /// <summary>Returns the actual enabled task state; a missing or mismatched task is a successful false result.</summary>
@@ -76,28 +47,9 @@ public sealed class StartupRegistration
         }
     }
 
-    /// <summary>Creates a verified ordinary-user logon task, or removes this user's task and legacy Run value.</summary>
-    public bool TrySetEnabled(bool enabled, out string? error)
-    {
-        error = null;
-        if (enabled)
-        {
-            if (!TryRegisterTask(out error)) return false;
-            if (!TryRemoveLegacyRun(out error))
-            {
-                error = "登录启动任务已启用，但未能移除旧启动项。" + error;
-                return false;
-            }
-            return true;
-        }
-
-        // Try both removals, even when one store is unavailable. Never touch another
-        // user's task, any other task name, or a neighboring registry value.
-        bool removedTask = TryDeleteTask(out string? taskError);
-        bool removedLegacy = TryRemoveLegacyRun(out string? legacyError);
-        error = taskError ?? legacyError;
-        return removedTask && removedLegacy;
-    }
+    /// <summary>Creates a verified ordinary-user logon task, or removes this user's task.</summary>
+    public bool TrySetEnabled(bool enabled, out string? error) =>
+        enabled ? TryRegisterTask(out error) : TryDeleteTask(out error);
 
     private bool TryRegisterTask(out string? error)
     {
@@ -147,7 +99,7 @@ public sealed class StartupRegistration
             object? saved = FindTask((object)folder, scope);
             if (saved is null || !MatchesTask(saved, scope) || !HasRequiredPermissions(saved))
             {
-                error = "未能确认登录启动任务及权限已正确保存，旧启动项已保留。";
+                error = "未能确认登录启动任务及权限已正确保存，请稍后重试。";
                 return false;
             }
             return true;
@@ -180,28 +132,6 @@ public sealed class StartupRegistration
         catch (Exception ex) when (IsExpectedFailure(ex))
         {
             error = TaskError(ex, reading: false);
-            return false;
-        }
-    }
-
-    private bool TryRemoveLegacyRun(out string? error)
-    {
-        error = null;
-        try
-        {
-            using RegistryKey? key = _legacyRoot.OpenSubKey(_legacyRunSubKey, writable: true);
-            if (key is null) return true;
-            key.DeleteValue(_legacyValueName, throwOnMissingValue: false);
-            if (key.GetValueNames().Contains(_legacyValueName, StringComparer.OrdinalIgnoreCase))
-            {
-                error = "未能确认旧启动项已移除，请稍后重试。";
-                return false;
-            }
-            return true;
-        }
-        catch (Exception ex) when (IsExpectedFailure(ex))
-        {
-            error = "无法移除当前用户的旧启动项，请稍后重试。";
             return false;
         }
     }

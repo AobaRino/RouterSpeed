@@ -30,7 +30,6 @@ public sealed class GlobalHotkey : IMessageFilter, IDisposable
     public ShortcutDefinition? Current { get; private set; }
     public string? RegistrationError { get; private set; }
     public bool IsRegistered => _registeredId.HasValue;
-    public event EventHandler? RegistrationChanged;
 
     /// <summary>Registers the replacement before releasing the old hotkey. Null disables it.</summary>
     public bool TrySet(ShortcutDefinition? shortcut, out string? error)
@@ -51,7 +50,6 @@ public sealed class GlobalHotkey : IMessageFilter, IDisposable
             UnregisterCurrent();
             Current = null;
             RegistrationError = null;
-            RegistrationChanged?.Invoke(this, EventArgs.Empty);
             return true;
         }
         if (shortcut.Validate() is { } invalid)
@@ -95,7 +93,6 @@ public sealed class GlobalHotkey : IMessageFilter, IDisposable
         _registeredId = candidateId;
         Current = shortcut;
         RegistrationError = null;
-        RegistrationChanged?.Invoke(this, EventArgs.Empty);
         return true;
     }
 
@@ -104,7 +101,6 @@ public sealed class GlobalHotkey : IMessageFilter, IDisposable
         // A failed replacement does not invalidate the old working shortcut.
         if (IsRegistered) return;
         RegistrationError = error;
-        RegistrationChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnHandleCreated(object? sender, EventArgs e)
@@ -117,10 +113,7 @@ public sealed class GlobalHotkey : IMessageFilter, IDisposable
     {
         UnregisterCurrent();
         if (!_disposed && Current is not null)
-        {
             RegistrationError = "窗口正在更新，快捷键会在窗口恢复后重新注册。";
-            RegistrationChanged?.Invoke(this, EventArgs.Empty);
-        }
     }
 
     public bool PreFilterMessage(ref Message message)

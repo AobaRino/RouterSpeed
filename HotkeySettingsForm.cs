@@ -12,8 +12,6 @@ public sealed class HotkeySettingsForm : Form
     private readonly Label _preview = new();
     private readonly Label _error = new();
 
-    public ShortcutDefinition? SavedShortcut { get; private set; }
-
     public HotkeySettingsForm(ShortcutDefinition? current, Func<ShortcutDefinition?, string?> apply)
     {
         _apply = apply ?? throw new ArgumentNullException(nameof(apply));
@@ -144,7 +142,6 @@ public sealed class HotkeySettingsForm : Form
         try
         {
             if (_apply(selected) is { } error) { _error.Text = error; return; }
-            SavedShortcut = selected;
             DialogResult = DialogResult.OK;
             Close();
         }
