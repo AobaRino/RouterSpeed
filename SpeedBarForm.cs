@@ -242,9 +242,9 @@ public sealed class SpeedBarForm : Form
         // A disconnected panel greys out completely instead of showing a warning marker.
         Color text = _snapshot.Connected ? Foreground : Muted;
         float rowHeight = (height - 2 * Inset) / 2;
-        PaintRow(g, HasUnclassifiedTraffic ? "直连*:" : "直连:", Inset, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
+        PaintRow(g, "直连:", Inset, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
         g.DrawLine(edge, 8, Inset + rowHeight, width - 8, Inset + rowHeight);
-        PaintRow(g, HasUnclassifiedTraffic ? "代理*:" : "代理:", Inset + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
+        PaintRow(g, "代理:", Inset + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
     }
 
     private void PaintRow(Graphics g, string label, float y, float height, double down, double up, Color text)
@@ -257,6 +257,9 @@ public sealed class SpeedBarForm : Form
             LineAlignment = StringAlignment.Center
         };
         float middle = y + height / 2;
+        // The partial-classification marker has its own slot in the left margin, so the
+        // label and colon stay put when it appears or disappears.
+        if (HasUnclassifiedTraffic) g.DrawString("*", _font, brush, new RectangleF(4, y, 8, height), format);
         g.DrawString(label, _font, brush, new RectangleF(12, y, 60, height), format);
         DrawArrow(g, brush, 62, middle, down: true);
         g.DrawString(FormatRate(down, _snapshot.Connected), _font, brush, new RectangleF(73, y, 90, height), format);

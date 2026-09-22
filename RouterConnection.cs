@@ -158,6 +158,9 @@ public sealed record Counters(long Timestamp, ulong DirectDown, ulong DirectUp, 
 
 public sealed class RateCalculator
 {
+    // A few stray bytes (a fragment, a flow still waiting for its route) are normal; only
+    // sustained unclassified traffic marks the interval, so the marker does not flicker.
+    private const double UnclassifiedThreshold = 1024;
     private readonly string _routerHost;
     private Counters? _previous;
     private SpeedSnapshot? _lastSnapshot;
@@ -188,7 +191,7 @@ public sealed class RateCalculator
         double pu = (next.ProxyUp - prev.ProxyUp) / seconds;
         double ud = (next.UnknownDown - prev.UnknownDown) / seconds;
         double uu = (next.UnknownUp - prev.UnknownUp) / seconds;
-        bool incomplete = ud + uu > 0 || next.DroppedPackets > prev.DroppedPackets;
+        bool incomplete = ud + uu >= UnclassifiedThreshold || next.DroppedPackets > prev.DroppedPackets;
         string status = incomplete ? "部分流量未分类 · IPv4" : "已连接 · IPv4";
         detail += $"\n当前未分类：▼ {ud / 1024:0.0} KB/s  ▲ {uu / 1024:0.0} KB/s" +
             $"\n采集期间累计丢包：{next.DroppedPackets}。日志缺失或统计重连可能使分类不完整。";

@@ -21,6 +21,7 @@ var cases = new (string Name, Action Run)[]
     ("Unclassified bytes are excluded from direct and proxy", UnclassifiedBytes),
     ("Packet loss marks classification as incomplete", PacketLoss),
     ("Historic unknown counts do not mark a later clean interval", HistoricUnknown),
+    ("Stray unclassified bytes below 1 KB/s do not mark the interval", StrayUnknown),
     ("Details identify the configured router", ConfiguredHost),
     ("Polling honors cancellation before attempting HTTP", CancelBeforeConnect),
     ("Collector process changes reset even increasing counters", InstanceChanges),
@@ -212,6 +213,16 @@ static void HistoricUnknown()
     calculator.Update(first);
     var result = calculator.Update(first with { Timestamp = 2000 });
     Check(result.Connected && !result.Status.Contains("未分类"), "Only the current interval should determine partial classification.");
+}
+static void StrayUnknown()
+{
+    var calculator = new RateCalculator();
+    var first = Baseline();
+    calculator.Update(first);
+    var quiet = calculator.Update(first with { Timestamp = 2000, UnknownDown = first.UnknownDown + 1023 });
+    Check(quiet.Connected && !quiet.Status.Contains("未分类"), "1023 B/s of unknown traffic should not mark the interval.");
+    var busy = calculator.Update(first with { Timestamp = 3000, UnknownDown = first.UnknownDown + 1023 + 1024 });
+    Check(busy.Connected && busy.Status.Contains("未分类"), "1 KB/s of unknown traffic should mark the interval.");
 }
 
 static void ConfiguredHost()
