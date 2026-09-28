@@ -77,7 +77,7 @@ internal static class OverlayUiCheck
             Check(Field<bool>(bar, "_miniMode"), "Fullscreen foreground selects mini mode");
             Check(normal.Size == new Size((int)Math.Round(168 * bar.DeviceDpi / 96f), (int)Math.Round(32 * bar.DeviceDpi / 96f)), $"Normal panel is the compact 168x32 logical size (got {normal.Size})");
             Check(bar.Right == screen.Right && bar.Bottom == screen.Bottom, "Mini bars sit in the bottom-right corner of the fullscreen monitor");
-            Check(bar.Width == (int)Math.Round(16 * bar.DeviceDpi / 96f) && bar.Height == screen.Height / 4, $"Mini strip is 16 logical px wide and a quarter of the screen tall (got {bar.Size})");
+            Check(bar.Width == (int)Math.Round(4 * bar.DeviceDpi / 96f) && bar.Height == screen.Height / 4, $"Mini strip is 4 logical px wide and a quarter of the screen tall (got {bar.Size})");
             Check(GetLayeredWindowAttributes(bar.Handle, out _, out byte miniAlpha, out uint miniFlags) && miniFlags == 2 && miniAlpha == (byte)Math.Round(255 * Field<int>(bar, "_opacityPercent") / 100d) && bar.BackColor == Color.Black,
                 "Mini strip is black and follows the tray opacity setting");
             using (var bitmap = new Bitmap(bar.Width, bar.Height))
@@ -117,6 +117,12 @@ internal static class OverlayUiCheck
             SendMessage(peer, 0x8042, 0, 0);
             Check(SpeedBarForm.MiniBarPixels(0, 100) == 0 && SpeedBarForm.MiniBarPixels(128d * 1024 * 1024, 100) == 100 &&
                 SpeedBarForm.MiniBarPixels(1024 * 1024, 100) is > 50 and < 70, "Mini bar length is logarithmic up to 1 Gbit/s");
+            // Your screenshot: direct 113 MB/s + 1.2 MB/s, proxy 4.9 + 4.8 KB/s, on a 360px strip.
+            var (shotDirect, shotProxy) = SpeedBarForm.MiniSegments(114.2 * 1024 * 1024, 9.7 * 1024, 360);
+            Check(shotProxy == 2 && shotDirect + shotProxy == SpeedBarForm.MiniBarPixels(114.2 * 1024 * 1024 + 9.7 * 1024, 360), "A dwarfed class keeps 2px without changing the total length");
+            var (evenDirect, evenProxy) = SpeedBarForm.MiniSegments(1024 * 1024, 3 * 1024 * 1024, 360);
+            Check(Math.Abs(evenProxy - 3 * evenDirect) <= 2, $"Direct and proxy split the length by their real share (got {evenDirect}:{evenProxy})");
+            Check(SpeedBarForm.MiniSegments(0, 0, 360) == (0, 0) && SpeedBarForm.MiniSegments(double.NaN, -5, 360) == (0, 0), "No or invalid traffic draws nothing");
             suspended = true;
             using var positionSpy = new PositionSpy(bar.Handle);
             Check(MovePeer(peer, -1) != 0, "Peer can reorder while monitor is suspended");
@@ -173,12 +179,12 @@ internal static class OverlayUiCheck
                     startupBar.DrawToBitmap(bars, startupBar.ClientRectangle);
                     bars.Save(Path.Combine(folder, "mini-bars.png"));
                     int bottom = bars.Height - 1;
-                    int green = Color.FromArgb(64, 220, 128).ToArgb(), orange = Color.FromArgb(255, 160, 48).ToArgb(), black = Color.Black.ToArgb();
-                    // Columns at 100% scaling: border 0, direct 1-6, gap 7-8, proxy 9-14, border 15.
-                    Check(new[] { 1, 6, 9, 14 }.All(x => bars.GetPixel(x, bottom).ToArgb() == green), "Both 6px bars start with download green at the bottom edge");
-                    Check(new[] { 0, 7, 8, 15 }.All(x => bars.GetPixel(x, bottom).ToArgb() == black), "Bars are separated by a black gap and framed by a black border");
-                    Check(bars.GetPixel(1, 0).ToArgb() == black, "Unused bar height shows the black strip");
-                    Check(Enumerable.Range(0, bars.Height).Any(y => bars.GetPixel(9, y).ToArgb() == orange), "Proxy upload is stacked in orange");
+                    int cyan = Color.FromArgb(88, 214, 215).ToArgb(), violet = Color.FromArgb(180, 152, 255).ToArgb(), black = Color.Black.ToArgb();
+                    // Direct 3000 B/s and proxy 7000 B/s: direct fills the bottom, proxy sits above it.
+                    var (expectDirect, expectProxy) = SpeedBarForm.MiniSegments(3000, 7000, bars.Height);
+                    Check(Enumerable.Range(0, bars.Width).All(x => bars.GetPixel(x, bottom).ToArgb() == cyan), "Direct fills the full 4px width from the bottom edge");
+                    Check(bars.GetPixel(0, bottom - expectDirect).ToArgb() == violet && bars.GetPixel(0, bottom - expectDirect + 1).ToArgb() == cyan, "Proxy starts right above direct");
+                    Check(bars.GetPixel(0, bottom - expectDirect - expectProxy).ToArgb() == black && bars.GetPixel(0, 0).ToArgb() == black, "Unused length shows the black strip");
                 }
                 SendMessage(peer, 0x8042, 0, 0);
                 startupBar.UpdateFullscreenLayout(peer);

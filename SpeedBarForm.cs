@@ -19,19 +19,15 @@ public sealed class SpeedBarForm : Form
     private const int RowHeight = 16;
     private static readonly Color Surface = Color.Black;
     private static readonly Color Foreground = Color.FromArgb(246, 250, 252);
-    // Fullscreen mini mode: a black strip in the monitor's bottom-right corner holding two
-    // bars, direct on the left and proxy on the right, each download (bottom) + upload (above).
-    // Logical px: 1 border + 6 bar + 2 gap + 6 bar + 1 border = 16 wide.
-    private const int MiniBar = 6;
-    private const int MiniGap = 2;
-    private const int MiniBorder = 1;
-    private static readonly Color DownloadColor = Color.FromArgb(64, 220, 128);
-    private static readonly Color UploadColor = Color.FromArgb(255, 160, 48);
-    // Log scale up to ~1 Gbit/s, so idle chatter and a full download both stay readable.
+    // Fullscreen mini mode: one 4px black strip in the monitor's bottom-right corner. The
+    // filled length shows total traffic on a log scale up to ~1 Gbit/s, so idle chatter and a
+    // full download both stay readable; inside it direct (bottom) and proxy (above) split that
+    // length by their real share, never by stacking separately scaled segments.
+    private const int MiniWidth = 4;
     private const double MiniFullScale = 128d * 1024 * 1024;
     private const int DefaultOpacityPercent = 80;
     private static readonly int[] OpacityChoices = [100, 90, 80, 70, 60, 50];
-    // Tray icon colours: cyan for direct, violet for proxy, grey while disconnected.
+    // Cyan for direct and violet for proxy (tray icon and mini strip); grey while disconnected.
     private static readonly Color Muted = Color.FromArgb(130, 142, 161);
     private static readonly Color DirectColor = Color.FromArgb(88, 214, 215);
     private static readonly Color ProxyColor = Color.FromArgb(180, 152, 255);
@@ -261,9 +257,7 @@ public sealed class SpeedBarForm : Form
         Graphics g = e.Graphics;
         if (_miniMode)
         {
-            int border = MiniPixels(MiniBorder), bar = MiniPixels(MiniBar), gap = MiniPixels(MiniGap);
-            PaintMiniColumn(g, border, bar, _snapshot.DirectDown, _snapshot.DirectUp);
-            PaintMiniColumn(g, border + bar + gap, bar, _snapshot.ProxyDown, _snapshot.ProxyUp);
+            PaintMiniStrip(g);
             return;
         }
         float scale = DeviceDpi / 96f;
@@ -293,20 +287,34 @@ public sealed class SpeedBarForm : Form
         g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(110, y, 62, RowHeight), format);
     }
 
-    // Drawn in whole physical pixels on the black strip: download from the bottom edge and
-    // upload stacked above it, each getting up to half of the strip's height.
-    private void PaintMiniColumn(Graphics g, int x, int width, double down, double up)
+    // Drawn in whole physical pixels on the black strip, direct from the bottom edge and
+    // proxy directly above it; upload and download of each class are combined.
+    private void PaintMiniStrip(Graphics g)
     {
         if (!_snapshot.Connected) return;
         int length = ClientSize.Height;
-        int downPixels = MiniBarPixels(down, length / 2), upPixels = MiniBarPixels(up, length / 2);
-        using var downBrush = new SolidBrush(DownloadColor);
-        using var upBrush = new SolidBrush(UploadColor);
-        g.FillRectangle(downBrush, x, length - downPixels, width, downPixels);
-        g.FillRectangle(upBrush, x, length - downPixels - upPixels, width, upPixels);
+        var (direct, proxy) = MiniSegments(_snapshot.DirectDown + _snapshot.DirectUp, _snapshot.ProxyDown + _snapshot.ProxyUp, length);
+        using var directBrush = new SolidBrush(DirectColor);
+        using var proxyBrush = new SolidBrush(ProxyColor);
+        g.FillRectangle(directBrush, 0, length - direct, ClientSize.Width, direct);
+        g.FillRectangle(proxyBrush, 0, length - direct - proxy, ClientSize.Width, proxy);
     }
 
-    private int MiniPixels(int logical) => Math.Max(1, (int)Math.Round(logical * DeviceDpi / 96f));
+    internal static (int Direct, int Proxy) MiniSegments(double direct, double proxy, int length)
+    {
+        direct = double.IsFinite(direct) && direct > 0 ? direct : 0;
+        proxy = double.IsFinite(proxy) && proxy > 0 ? proxy : 0;
+        double total = direct + proxy;
+        int filled = MiniBarPixels(total, length);
+        if (filled == 0) return (0, 0);
+        int directPixels = (int)Math.Round(direct / total * filled), proxyPixels = filled - directPixels;
+        // A class carrying real traffic (1 KB/s or more) stays visible even when dwarfed.
+        const double visible = 1024;
+        const int minimum = 2;
+        if (proxyPixels < minimum && proxy >= visible) { proxyPixels = Math.Min(minimum, filled); directPixels = filled - proxyPixels; }
+        if (directPixels < minimum && direct >= visible) { directPixels = Math.Min(minimum, filled); proxyPixels = filled - directPixels; }
+        return (directPixels, proxyPixels);
+    }
 
     internal static int MiniBarPixels(double bytesPerSecond, int maximum)
     {
@@ -351,7 +359,7 @@ public sealed class SpeedBarForm : Form
 
     // The mini strip is a quarter of the fullscreen monitor tall.
     private void ApplyPanelSize() => ClientSize = _miniMode
-        ? new Size(2 * MiniPixels(MiniBorder) + 2 * MiniPixels(MiniBar) + MiniPixels(MiniGap), Math.Max(2, _fullscreenArea.Height / 4))
+        ? new Size(Math.Max(1, (int)Math.Round(MiniWidth * DeviceDpi / 96f)), Math.Max(2, _fullscreenArea.Height / 4))
         : NormalSize;
 
     internal void UpdateFullscreenLayout(nint foreground)
@@ -451,7 +459,7 @@ public sealed class SpeedBarForm : Form
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
             "浮窗点击穿透；右键托盘图标打开菜单。",
             TopMost ? "保持置顶已开启。" : "浮窗置底，其他应用窗口可以覆盖它。",
-            _miniMode ? "全屏迷你模式：右下角黑色竖条里两根柱，左直连、右代理；绿色下载、橙色上传。" : "置顶时遇到全屏窗口自动缩成右下角的竖条，退出后恢复。",
+            _miniMode ? "全屏迷你模式：右下角 4px 竖条，下段青色是直连、上段紫色是代理，长度表示总网速。" : "置顶时遇到全屏窗口自动缩成右下角的竖条，退出后恢复。",
             "移动浮窗请使用托盘菜单的“位置设置”。"
         ];
         var items = _detailsItem.DropDownItems;
