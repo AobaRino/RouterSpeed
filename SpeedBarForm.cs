@@ -19,10 +19,12 @@ public sealed class SpeedBarForm : Form
     private const int RowHeight = 16;
     private static readonly Color Surface = Color.Black;
     private static readonly Color Foreground = Color.FromArgb(246, 250, 252);
-    // Fullscreen mini mode: two 1px columns in the monitor's bottom-right corner, direct on
-    // the left and proxy on the right. Download is stacked from the bottom, upload above it.
-    private const int MiniColumns = 2;
-    private static readonly Color MiniTransparent = Color.FromArgb(255, 0, 255);
+    // Fullscreen mini mode: a black strip in the monitor's bottom-right corner holding two
+    // bars, direct on the left and proxy on the right, each download (bottom) + upload (above).
+    // Logical px: 1 border + 6 bar + 2 gap + 6 bar + 1 border = 16 wide.
+    private const int MiniBar = 6;
+    private const int MiniGap = 2;
+    private const int MiniBorder = 1;
     private static readonly Color DownloadColor = Color.FromArgb(64, 220, 128);
     private static readonly Color UploadColor = Color.FromArgb(255, 160, 48);
     // Log scale up to ~1 Gbit/s, so idle chatter and a full download both stay readable.
@@ -183,12 +185,7 @@ public sealed class SpeedBarForm : Form
 
     private void ApplyPanelOpacity()
     {
-        if (!IsHandleCreated) return;
-        // Mini mode keys out the background colour (LWA_COLORKEY | LWA_ALPHA) so only the
-        // coloured bar pixels are drawn over the fullscreen app, at full strength.
-        if (_miniMode)
-            SetLayeredWindowAttributes(Handle, (uint)ColorTranslator.ToWin32(MiniTransparent), 255, 3);
-        else
+        if (IsHandleCreated)
             SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(255 * _opacityPercent / 100d), 2);
     }
 
@@ -264,8 +261,9 @@ public sealed class SpeedBarForm : Form
         Graphics g = e.Graphics;
         if (_miniMode)
         {
-            PaintMiniColumn(g, 0, _snapshot.DirectDown, _snapshot.DirectUp);
-            PaintMiniColumn(g, 1, _snapshot.ProxyDown, _snapshot.ProxyUp);
+            int border = MiniPixels(MiniBorder), bar = MiniPixels(MiniBar), gap = MiniPixels(MiniGap);
+            PaintMiniColumn(g, border, bar, _snapshot.DirectDown, _snapshot.DirectUp);
+            PaintMiniColumn(g, border + bar + gap, bar, _snapshot.ProxyDown, _snapshot.ProxyUp);
             return;
         }
         float scale = DeviceDpi / 96f;
@@ -298,18 +296,20 @@ public sealed class SpeedBarForm : Form
         g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(115, y, 62, RowHeight), format);
     }
 
-    // Drawn in physical pixels: one crisp 1px column per class, download from the bottom
-    // and upload stacked above it, each getting up to half of the column.
-    private void PaintMiniColumn(Graphics g, int x, double down, double up)
+    // Drawn in whole physical pixels on the black strip: download from the bottom edge and
+    // upload stacked above it, each getting up to half of the strip's height.
+    private void PaintMiniColumn(Graphics g, int x, int width, double down, double up)
     {
         if (!_snapshot.Connected) return;
         int length = ClientSize.Height;
         int downPixels = MiniBarPixels(down, length / 2), upPixels = MiniBarPixels(up, length / 2);
         using var downBrush = new SolidBrush(DownloadColor);
         using var upBrush = new SolidBrush(UploadColor);
-        g.FillRectangle(downBrush, x, length - downPixels, 1, downPixels);
-        g.FillRectangle(upBrush, x, length - downPixels - upPixels, 1, upPixels);
+        g.FillRectangle(downBrush, x, length - downPixels, width, downPixels);
+        g.FillRectangle(upBrush, x, length - downPixels - upPixels, width, upPixels);
     }
+
+    private int MiniPixels(int logical) => Math.Max(1, (int)Math.Round(logical * DeviceDpi / 96f));
 
     internal static int MiniBarPixels(double bytesPerSecond, int maximum)
     {
@@ -352,9 +352,9 @@ public sealed class SpeedBarForm : Form
         Invalidate();
     }
 
-    // The mini columns are literal 1px wide and a quarter of the fullscreen monitor tall.
+    // The mini strip is a quarter of the fullscreen monitor tall.
     private void ApplyPanelSize() => ClientSize = _miniMode
-        ? new Size(MiniColumns, Math.Max(2, _fullscreenArea.Height / 4))
+        ? new Size(2 * MiniPixels(MiniBorder) + 2 * MiniPixels(MiniBar) + MiniPixels(MiniGap), Math.Max(2, _fullscreenArea.Height / 4))
         : new Size((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
 
     internal void UpdateFullscreenLayout(nint foreground)
@@ -383,9 +383,7 @@ public sealed class SpeedBarForm : Form
     private void SetMiniMode(bool mini)
     {
         _miniMode = mini;
-        BackColor = mini ? MiniTransparent : Surface;
         ApplyPanelSize();
-        ApplyPanelOpacity();
         Invalidate();
     }
 
@@ -456,7 +454,7 @@ public sealed class SpeedBarForm : Form
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
             "浮窗点击穿透；右键托盘图标打开菜单。",
             TopMost ? "保持置顶已开启。" : "浮窗置底，其他应用窗口可以覆盖它。",
-            _miniMode ? "全屏迷你模式：右下角两条 1px 竖条，左直连、右代理；绿色下载、橙色上传。" : "置顶时遇到全屏窗口自动缩成右下角两条竖线，退出后恢复。",
+            _miniMode ? "全屏迷你模式：右下角黑色竖条里两根柱，左直连、右代理；绿色下载、橙色上传。" : "置顶时遇到全屏窗口自动缩成右下角的竖条，退出后恢复。",
             "移动浮窗请使用托盘菜单的“位置设置”。"
         ];
         var items = _detailsItem.DropDownItems;
