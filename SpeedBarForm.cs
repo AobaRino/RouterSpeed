@@ -14,7 +14,7 @@ namespace RouterSpeed;
 public sealed class SpeedBarForm : Form
 {
     // Borderless, margin-free two-row panel sized to its widest value ("1023 KB/s") at 12px.
-    private const int LogicalWidth = 174;
+    private const int LogicalWidth = 168;
     private const int LogicalHeight = 32;
     private const int RowHeight = 16;
     private static readonly Color Surface = Color.Black;
@@ -286,14 +286,11 @@ public sealed class SpeedBarForm : Form
             LineAlignment = StringAlignment.Center
         };
         float middle = y + RowHeight / 2f;
-        // The partial-classification marker has its own 5px slot, so the label and colon
-        // stay put when it appears or disappears.
-        if (HasUnclassifiedTraffic) g.DrawString("*", _font, brush, new RectangleF(0, y, 5, RowHeight), format);
-        g.DrawString(label, _font, brush, new RectangleF(5, y, 30, RowHeight), format);
-        DrawArrow(g, brush, 35, middle, down: true);
-        g.DrawString(FormatRate(down, _snapshot.Connected), _font, brush, new RectangleF(43, y, 62, RowHeight), format);
-        DrawArrow(g, brush, 107, middle, down: false);
-        g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(115, y, 62, RowHeight), format);
+        g.DrawString(label, _font, brush, new RectangleF(0, y, 30, RowHeight), format);
+        DrawArrow(g, brush, 30, middle, down: true);
+        g.DrawString(FormatRate(down, _snapshot.Connected), _font, brush, new RectangleF(38, y, 62, RowHeight), format);
+        DrawArrow(g, brush, 102, middle, down: false);
+        g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(110, y, 62, RowHeight), format);
     }
 
     // Drawn in whole physical pixels on the black strip: download from the bottom edge and
@@ -355,7 +352,7 @@ public sealed class SpeedBarForm : Form
     // The mini strip is a quarter of the fullscreen monitor tall.
     private void ApplyPanelSize() => ClientSize = _miniMode
         ? new Size(2 * MiniPixels(MiniBorder) + 2 * MiniPixels(MiniBar) + MiniPixels(MiniGap), Math.Max(2, _fullscreenArea.Height / 4))
-        : new Size((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
+        : NormalSize;
 
     internal void UpdateFullscreenLayout(nint foreground)
     {
@@ -450,7 +447,7 @@ public sealed class SpeedBarForm : Form
             $"直连  ▼ {FormatRate(_snapshot.DirectDown, _snapshot.Connected)}   ▲ {FormatRate(_snapshot.DirectUp, _snapshot.Connected)}",
             $"代理  ▼ {FormatRate(_snapshot.ProxyDown, _snapshot.Connected)}   ▲ {FormatRate(_snapshot.ProxyUp, _snapshot.Connected)}",
             .. _snapshot.Detail.Split('\n', StringSplitOptions.RemoveEmptyEntries).SelectMany(WrapMenuLine),
-            HasUnclassifiedTraffic ? "* 仅显示已确认的直连和代理流量。" : "只统计这台 Windows 电脑的 IPv4 公网流量。",
+            HasUnclassifiedTraffic ? "有流量暂时未分类，只计入已确认的直连和代理。" : "只统计这台 Windows 电脑的 IPv4 公网流量。",
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
             "浮窗点击穿透；右键托盘图标打开菜单。",
             TopMost ? "保持置顶已开启。" : "浮窗置底，其他应用窗口可以覆盖它。",
@@ -512,17 +509,36 @@ public sealed class SpeedBarForm : Form
 
     private void RestorePosition()
     {
-        if (_preferences is null) ResetPosition();
-        else { Location = new Point(_preferences.X, _preferences.Y); ClampToWorkArea(); }
+        if (_preferences is null) { ResetPosition(); return; }
+        // Files written before the size was saved come from the 270x56 panel.
+        var saved = new Rectangle(_preferences.X, _preferences.Y,
+            _preferences.Width > 0 ? _preferences.Width : 270, _preferences.Height > 0 ? _preferences.Height : 56);
+        Location = StickToEdges(saved, NormalSize, Screen.FromRectangle(saved).WorkingArea,
+            (int)Math.Round(12 * DeviceDpi / 96f));
+        ClampToWorkArea();
     }
 
-    // Bottom-right corner of the primary work area, just above the taskbar, like TrafficMonitor.
+    /// <summary>
+    /// A panel that was saved against (or within <paramref name="tolerance"/> of) a work-area
+    /// edge stays against that edge when its size changes, so a corner panel stays in the corner.
+    /// </summary>
+    internal static Point StickToEdges(Rectangle saved, Size size, Rectangle area, int tolerance)
+    {
+        int x = saved.X, y = saved.Y;
+        if (area.Right - saved.Right <= tolerance) x = area.Right - size.Width;
+        else if (saved.Left - area.Left <= tolerance) x = area.Left;
+        if (area.Bottom - saved.Bottom <= tolerance) y = area.Bottom - size.Height;
+        else if (saved.Top - area.Top <= tolerance) y = area.Top;
+        return new Point(x, y);
+    }
+
+    private Size NormalSize => new((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
+
+    // Flush with the bottom-right corner of the primary work area, just above the taskbar.
     private void ResetPosition()
     {
         Rectangle area = (Screen.PrimaryScreen ?? Screen.FromPoint(Cursor.Position)).WorkingArea;
-        int margin = (int)Math.Round(12 * DeviceDpi / 96f);
-        var point = new Point(area.Right - (int)Math.Round(LogicalWidth * DeviceDpi / 96f) - margin,
-            area.Bottom - (int)Math.Round(LogicalHeight * DeviceDpi / 96f) - margin);
+        var point = new Point(area.Right - NormalSize.Width, area.Bottom - NormalSize.Height);
         if (_miniMode) _normalLocation = point;
         else Location = point;
     }
@@ -547,7 +563,8 @@ public sealed class SpeedBarForm : Form
         try
         {
             Point location = _miniMode ? _normalLocation : Location;
-            var settings = new UiPreferences(location.X, location.Y, TopMost, true, _shortcut, _opacityPercent);
+            var settings = new UiPreferences(location.X, location.Y, TopMost, true, _shortcut, _opacityPercent,
+                NormalSize.Width, NormalSize.Height);
             string file = _preferencesPath;
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
             File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(settings));
@@ -607,7 +624,7 @@ public sealed class SpeedBarForm : Form
 
     // Older DisplayMode and Locked properties are ignored; position and shortcuts survive.
     private sealed record UiPreferences(int X, int Y, bool AlwaysOnTop, bool ShortcutConfigured = false,
-        ShortcutDefinition? Shortcut = null, int OpacityPercent = DefaultOpacityPercent);
+        ShortcutDefinition? Shortcut = null, int OpacityPercent = DefaultOpacityPercent, int Width = 0, int Height = 0);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -75,7 +75,7 @@ internal static class OverlayUiCheck
             monitor.ApplyOrder();
             Rectangle screen = Screen.FromHandle(peer).Bounds;
             Check(Field<bool>(bar, "_miniMode"), "Fullscreen foreground selects mini mode");
-            Check(normal.Size == new Size((int)Math.Round(174 * bar.DeviceDpi / 96f), (int)Math.Round(32 * bar.DeviceDpi / 96f)), $"Normal panel is the compact 174x32 logical size (got {normal.Size})");
+            Check(normal.Size == new Size((int)Math.Round(168 * bar.DeviceDpi / 96f), (int)Math.Round(32 * bar.DeviceDpi / 96f)), $"Normal panel is the compact 168x32 logical size (got {normal.Size})");
             Check(bar.Right == screen.Right && bar.Bottom == screen.Bottom, "Mini bars sit in the bottom-right corner of the fullscreen monitor");
             Check(bar.Width == (int)Math.Round(16 * bar.DeviceDpi / 96f) && bar.Height == screen.Height / 4, $"Mini strip is 16 logical px wide and a quarter of the screen tall (got {bar.Size})");
             Check(GetLayeredWindowAttributes(bar.Handle, out _, out byte miniAlpha, out uint miniFlags) && miniFlags == 2 && miniAlpha == (byte)Math.Round(255 * Field<int>(bar, "_opacityPercent") / 100d) && bar.BackColor == Color.Black,
@@ -91,6 +91,15 @@ internal static class OverlayUiCheck
             Check(!Field<bool>(bar, "_miniMode") && bar.Bounds == normal, "Leaving fullscreen restores original size and position");
             Check(GetLayeredWindowAttributes(bar.Handle, out _, out _, out uint normalFlags) && normalFlags == 2 && bar.BackColor == Color.Black,
                 "Leaving fullscreen restores the black, uniformly translucent panel");
+            typeof(SpeedBarForm).GetMethod("ResetPosition", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(bar, null);
+            Rectangle work = (Screen.PrimaryScreen ?? Screen.FromHandle(bar.Handle)).WorkingArea;
+            Check(bar.Right == work.Right && bar.Bottom == work.Bottom, "Reset position is flush with the bottom-right corner");
+            bar.Location = normal.Location;
+            var area1440 = new Rectangle(0, 0, 2560, 1392);
+            var compact = new Size(168, 32);
+            Check(SpeedBarForm.StickToEdges(new Rectangle(2290, 1336, 270, 56), compact, area1440, 12) == new Point(2392, 1360), "A corner-flush panel stays in the corner after shrinking");
+            Check(SpeedBarForm.StickToEdges(new Rectangle(2278, 1324, 270, 56), compact, area1440, 12) == new Point(2392, 1360), "The old 12px reset margin snaps to the corner");
+            Check(SpeedBarForm.StickToEdges(new Rectangle(1000, 500, 270, 56), compact, area1440, 12) == new Point(1000, 500), "A free-floating position is kept as saved");
             Check(!FullscreenWindow.CoversScreen(new Rectangle(0, 0, 1920, 1040), new Rectangle(0, 0, 1920, 1080)), "Taskbar-sized gap is not fullscreen");
             Check(FullscreenWindow.CoversScreen(new Rectangle(-1920, -200, 1920, 1080), new Rectangle(-1920, -200, 1920, 1080)), "Fullscreen geometry supports negative monitor coordinates");
             // Under an auto-hidden taskbar a maximized window spans the monitor plus its invisible
