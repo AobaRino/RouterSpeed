@@ -7,14 +7,16 @@ namespace RouterSpeed;
 
 /// <summary>
 /// A small desktop panel in the TrafficMonitor style: two "label: value" rows on a dark
-/// semi-transparent plate with square corners. It can be dragged, locked in place, kept on
-/// top, hidden with a shortcut, and it never touches the taskbar. All rates supplied by the
+/// semi-transparent, click-through plate with selectable topmost or desktop placement.
+/// It can be hidden with a shortcut; all interaction lives in the tray. All rates supplied by the
 /// poller are bytes per second.
 /// </summary>
 public sealed class SpeedBarForm : Form
 {
     private const int LogicalWidth = 270;
     private const int LogicalHeight = 56;
+    private const int MiniWidth = 164;
+    private const int MiniHeight = 40;
     private const int Inset = 5;
     // Sampled from the TrafficMonitor skin this panel imitates: a dark teal plate at 80%
     // window opacity, square corners, a hairline border and a divider between the rows.
@@ -35,9 +37,10 @@ public sealed class SpeedBarForm : Form
     private readonly GlobalHotkey _hotkey;
     private readonly StartupRegistration _startup = new();
     private readonly Font _font = new("Microsoft YaHei UI", 14f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font _miniFont = new("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly string _preferencesPath;
+    private readonly PanelOrderMonitor _panelOrder;
     private readonly ToolStripMenuItem _topmostItem;
-    private readonly ToolStripMenuItem _lockItem;
     private readonly ToolStripMenuItem _opacityItem = new("透明度");
     private readonly ToolStripMenuItem _visibilityItem;
     private readonly ToolStripLabel _statusItem = new();
@@ -49,22 +52,21 @@ public sealed class SpeedBarForm : Form
     private SpeedSnapshot _snapshot = new(0, 0, 0, 0, "正在连接", "正在从路由器读取本机的直连和代理网速。", false);
     private Icon? _trayIcon;
     private int? _iconState;
-    private bool _dragging;
-    private Point _dragStartCursor;
-    private Point _dragStartLocation;
     private UiPreferences? _preferences;
     private Task? _pollTask;
     private bool _resourcesDisposed;
     private bool _userHidden;
     private bool _started;
-    private bool _locked;
     private int _opacityPercent = DefaultOpacityPercent;
+    private bool _miniMode;
+    private Point _normalLocation;
+    private Rectangle _fullscreenArea;
 
     public SpeedBarForm(Func<CancellationToken, Task<SpeedSnapshot>> poll, Action? configure = null)
         : this(poll, configure, PreferencesPath) { }
 
     // A separate preferences path lets UI checks run without touching user state.
-    internal SpeedBarForm(Func<CancellationToken, Task<SpeedSnapshot>> poll, Action? configure, string preferencesPath)
+    internal SpeedBarForm(Func<CancellationToken, Task<SpeedSnapshot>> poll, Action? configure, string preferencesPath, Func<nint>? foreground = null)
     {
         _poll = poll ?? throw new ArgumentNullException(nameof(poll));
         _configure = configure;
@@ -84,9 +86,7 @@ public sealed class SpeedBarForm : Form
         SetStyle(ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint, true);
         _preferences = ReadPreferences();
         TopMost = _preferences?.AlwaysOnTop ?? false;
-        _locked = _preferences?.Locked ?? false;
         _opacityPercent = Math.Clamp(_preferences?.OpacityPercent ?? DefaultOpacityPercent, 30, 100);
-        Opacity = _opacityPercent / 100d;
         _shortcut = _preferences is { ShortcutConfigured: true } ? _preferences.Shortcut : ShortcutDefinition.Default;
 
         _visibilityItem = new ToolStripMenuItem("隐藏网速条", null, (_, _) => ToggleVisibility());
@@ -100,13 +100,7 @@ public sealed class SpeedBarForm : Form
         {
             TopMost = !TopMost;
             _topmostItem.Checked = TopMost;
-            SavePreferences();
-        };
-        _lockItem = new ToolStripMenuItem("锁定位置") { Checked = _locked, AccessibleDescription = "锁定后不能拖动，位置固定不变。" };
-        _lockItem.Click += (_, _) =>
-        {
-            _locked = !_locked;
-            _lockItem.Checked = _locked;
+            _panelOrder?.ApplyOrder();
             SavePreferences();
         };
         _opacityItem.DropDown.ShowItemToolTips = false;
@@ -117,7 +111,7 @@ public sealed class SpeedBarForm : Form
             choice.Click += (_, _) =>
             {
                 _opacityPercent = value;
-                Opacity = value / 100d;
+                ApplyPanelOpacity();
                 UpdateOpacityMenu();
                 SavePreferences();
             };
@@ -132,7 +126,7 @@ public sealed class SpeedBarForm : Form
         _menu.Items.Add(_visibilityItem);
         _menu.Items.Add(_hotkeyItem);
         _menu.Items.Add(_hotkeyErrorItem);
-        _menu.Items.Add(_lockItem);
+        _menu.Items.Add("位置设置…", null, (_, _) => OpenPositionSettings());
         _menu.Items.Add(_topmostItem);
         _menu.Items.Add(_opacityItem);
         _menu.Items.Add(_startupItem);
@@ -143,7 +137,10 @@ public sealed class SpeedBarForm : Form
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("退出", null, (_, _) => Close());
         _menu.Opening += (_, _) => UpdateMenu();
-        ContextMenuStrip = _menu;
+        _menu.Closed += (_, _) =>
+        {
+            if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)(() => _panelOrder?.ApplyOrder()));
+        };
         _tray.ContextMenuStrip = _menu;
         _tray.DoubleClick += (_, _) => ToggleVisibility();
         // An empty NotifyIcon.Text also suppresses the native tray hover balloon.
@@ -156,11 +153,36 @@ public sealed class SpeedBarForm : Form
             ToggleVisibility();
         });
         _hotkey.TrySet(_shortcut, out _);
+        _panelOrder = new PanelOrderMonitor(this, () => !_started || _menu.Visible || OwnedForms.Any(form => form.Visible), foreground, UpdateFullscreenLayout);
         UpdatePresentation();
         _tray.Visible = true;
     }
 
     protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            // LAYERED + TRANSPARENT passes input through across processes, including
+            // at 100% opacity. NOACTIVATE prevents taking keyboard focus from a game.
+            cp.ExStyle |= 0x00080000 | 0x00000020 | 0x08000000 | 0x00000080;
+            return cp;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyPanelOpacity();
+    }
+
+    private void ApplyPanelOpacity()
+    {
+        if (IsHandleCreated)
+            SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(255 * _opacityPercent / 100d), 2);
+    }
 
     protected override void OnShown(EventArgs e)
     {
@@ -168,6 +190,7 @@ public sealed class SpeedBarForm : Form
         if (_started) return;
         _started = true;
         RestorePosition();
+        _panelOrder.ApplyOrder();
         _pollTask ??= PollContinuouslyAsync(_lifetime.Token);
     }
 
@@ -241,6 +264,12 @@ public sealed class SpeedBarForm : Form
         g.DrawRectangle(edge, .5f, .5f, width - 1, height - 1);
         // A disconnected panel greys out completely instead of showing a warning marker.
         Color text = _snapshot.Connected ? Foreground : Muted;
+        if (_miniMode)
+        {
+            PaintMiniRow(g, "直", 0, _snapshot.DirectDown, _snapshot.DirectUp, text);
+            PaintMiniRow(g, "代", MiniHeight / 2f, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
+            return;
+        }
         float rowHeight = (height - 2 * Inset) / 2;
         PaintRow(g, "直连:", Inset, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
         g.DrawLine(edge, 8, Inset + rowHeight, width - 8, Inset + rowHeight);
@@ -265,6 +294,26 @@ public sealed class SpeedBarForm : Form
         g.DrawString(FormatRate(down, _snapshot.Connected), _font, brush, new RectangleF(73, y, 90, height), format);
         DrawArrow(g, brush, 165, middle, down: false);
         g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(176, y, 90, height), format);
+    }
+
+    private void PaintMiniRow(Graphics g, string label, float y, double down, double up, Color text)
+    {
+        using var brush = new SolidBrush(text);
+        using var format = new StringFormat(StringFormat.GenericTypographic)
+        { FormatFlags = StringFormatFlags.NoWrap, LineAlignment = StringAlignment.Center };
+        const float rowHeight = MiniHeight / 2f;
+        g.DrawString(label, _miniFont, brush, new RectangleF(4, y, 17, rowHeight), format);
+        DrawArrow(g, brush, 23, y + rowHeight / 2, true);
+        g.DrawString(FormatMiniRate(down, _snapshot.Connected), _miniFont, brush, new RectangleF(34, y, 55, rowHeight), format);
+        DrawArrow(g, brush, 91, y + rowHeight / 2, false);
+        g.DrawString(FormatMiniRate(up, _snapshot.Connected), _miniFont, brush, new RectangleF(102, y, 59, rowHeight), format);
+    }
+
+    private static string FormatMiniRate(double rate, bool connected)
+    {
+        if (connected && double.IsFinite(rate) && rate >= 999 * Math.Pow(1024, 4)) return "999T+";
+        return FormatRate(rate, connected).Replace(" B/s", "B").Replace(" KB/s", "K").Replace(" MB/s", "M")
+            .Replace(" GB/s", "G").Replace(" TB/s", "T");
     }
 
     /// <summary>A squat filled triangle (7×5 logical px) reads as up/down at small sizes better than a text arrow.</summary>
@@ -293,53 +342,44 @@ public sealed class SpeedBarForm : Form
         return $"{number} {units[unit]}";
     }
 
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left || _locked) return;
-        _dragging = true;
-        _dragStartCursor = Cursor.Position;
-        _dragStartLocation = Location;
-        Capture = true;
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        base.OnMouseMove(e);
-        if (!_dragging) return;
-        Point cursor = Cursor.Position;
-        Location = new Point(_dragStartLocation.X + cursor.X - _dragStartCursor.X,
-            _dragStartLocation.Y + cursor.Y - _dragStartCursor.Y);
-    }
-
-    protected override void OnMouseUp(MouseEventArgs e)
-    {
-        base.OnMouseUp(e);
-        if (!_dragging || e.Button != MouseButtons.Left) return;
-        _dragging = false;
-        Capture = false;
-        ClampToWorkArea();
-        SavePreferences();
-    }
-
-    protected override void OnMouseCaptureChanged(EventArgs e)
-    {
-        base.OnMouseCaptureChanged(e);
-        if (!Capture) _dragging = false;
-    }
-
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-    {
-        if (keyData == Keys.Escape) { _userHidden = true; Hide(); return true; }
-        if (keyData == Keys.Enter) { _menu.Show(this, new Point(0, Height)); return true; }
-        return base.ProcessCmdKey(ref msg, keyData);
-    }
-
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
-        ClientSize = new Size((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
+        ApplyPanelSize();
+        if (_miniMode) PositionMiniPanel();
         Invalidate();
+    }
+
+    private void ApplyPanelSize() => ClientSize = new Size(
+        (int)Math.Round((_miniMode ? MiniWidth : LogicalWidth) * DeviceDpi / 96f),
+        (int)Math.Round((_miniMode ? MiniHeight : LogicalHeight) * DeviceDpi / 96f));
+
+    internal void UpdateFullscreenLayout(nint foreground)
+    {
+        if (TopMost && foreground == 0) return;
+        Rectangle screen = Rectangle.Empty;
+        bool mini = TopMost && FullscreenWindow.TryGetScreen(foreground, out screen);
+        bool changed = mini != _miniMode;
+        if (mini)
+        {
+            _fullscreenArea = screen;
+            if (!_miniMode) { _normalLocation = Location; _miniMode = true; ApplyPanelSize(); }
+            PositionMiniPanel();
+        }
+        else if (_miniMode)
+        {
+            _miniMode = false;
+            ApplyPanelSize();
+            Location = _normalLocation;
+            ClampToWorkArea();
+        }
+        if (changed) Invalidate();
+    }
+
+    private void PositionMiniPanel()
+    {
+        Point point = new(_fullscreenArea.Right - Width, _fullscreenArea.Top + (_fullscreenArea.Height - Height) / 2);
+        if (Location != point) Location = point;
     }
 
     private void ToggleVisibility()
@@ -351,19 +391,18 @@ public sealed class SpeedBarForm : Form
     private void ShowBar()
     {
         _userHidden = false;
-        ClampToWorkArea();
+        if (!_miniMode) ClampToWorkArea();
         Show();
-        if (TopMost) BringToFront();
+        _panelOrder.ApplyOrder();
     }
 
     private void UpdateMenu()
     {
+        _topmostItem.Checked = TopMost;
         _visibilityItem.Text = _userHidden ? "显示网速条" : "隐藏网速条";
         _visibilityItem.ShortcutKeyDisplayString = _hotkey.IsRegistered ? _hotkey.Current?.DisplayText ?? string.Empty : string.Empty;
         _hotkeyErrorItem.Text = _hotkey.RegistrationError ?? string.Empty;
         _hotkeyErrorItem.Visible = _hotkey.RegistrationError is not null;
-        _lockItem.Checked = _locked;
-        _topmostItem.Checked = TopMost;
         UpdateOpacityMenu();
         UpdateStartupMenu();
         UpdateDetailValues();
@@ -402,7 +441,10 @@ public sealed class SpeedBarForm : Form
             .. _snapshot.Detail.Split('\n', StringSplitOptions.RemoveEmptyEntries).SelectMany(WrapMenuLine),
             HasUnclassifiedTraffic ? "* 仅显示已确认的直连和代理流量。" : "只统计这台 Windows 电脑的 IPv4 公网流量。",
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
-            _locked ? "位置已锁定；右键菜单可解锁。" : "拖动可移动位置；右键打开菜单。"
+            "浮窗点击穿透；右键托盘图标打开菜单。",
+            TopMost ? "保持置顶已开启。" : "浮窗置底，其他应用窗口可以覆盖它。",
+            _miniMode ? "全屏迷你模式：直 / 代，▼ 下载、▲ 上传；B/K/M/G/T 每秒。" : "置顶时遇到全屏窗口自动缩小，退出后恢复。",
+            "移动浮窗请使用托盘菜单的“位置设置”。"
         ];
         var items = _detailsItem.DropDownItems;
         while (items.Count > lines.Length) { var last = items[^1]; items.Remove(last); last.Dispose(); }
@@ -447,6 +489,16 @@ public sealed class SpeedBarForm : Form
         }
     }
 
+    private void OpenPositionSettings()
+    {
+        using var dialog = new PanelPositionForm(_miniMode ? _normalLocation : Location);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (_miniMode) _normalLocation = dialog.PanelLocation;
+        else { Location = dialog.PanelLocation; ClampToWorkArea(); }
+        _panelOrder.ApplyOrder();
+        SavePreferences();
+    }
+
     private void RestorePosition()
     {
         if (_preferences is null) ResetPosition();
@@ -458,7 +510,10 @@ public sealed class SpeedBarForm : Form
     {
         Rectangle area = (Screen.PrimaryScreen ?? Screen.FromPoint(Cursor.Position)).WorkingArea;
         int margin = (int)Math.Round(12 * DeviceDpi / 96f);
-        Location = new Point(area.Right - Width - margin, area.Bottom - Height - margin);
+        var point = new Point(area.Right - (int)Math.Round(LogicalWidth * DeviceDpi / 96f) - margin,
+            area.Bottom - (int)Math.Round(LogicalHeight * DeviceDpi / 96f) - margin);
+        if (_miniMode) _normalLocation = point;
+        else Location = point;
     }
 
     private void ClampToWorkArea()
@@ -480,7 +535,8 @@ public sealed class SpeedBarForm : Form
     {
         try
         {
-            var settings = new UiPreferences(Location.X, Location.Y, TopMost, true, _shortcut, _locked, _opacityPercent);
+            Point location = _miniMode ? _normalLocation : Location;
+            var settings = new UiPreferences(location.X, location.Y, TopMost, true, _shortcut, _opacityPercent);
             string file = _preferencesPath;
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
             File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(settings));
@@ -522,6 +578,7 @@ public sealed class SpeedBarForm : Form
         if (disposing && !_resourcesDisposed)
         {
             _resourcesDisposed = true;
+            _panelOrder?.Dispose();
             _lifetime.Cancel();
             _tray.Visible = false;
             _tray.Dispose();
@@ -529,6 +586,7 @@ public sealed class SpeedBarForm : Form
             _hotkey.Dispose();
             _menu.Dispose();
             _font.Dispose();
+            _miniFont.Dispose();
             // The poller may still be unwinding its cancellation; keep its token source alive
             // until then so implementations can safely register cancellation while exiting.
             if (_pollTask is null || _pollTask.IsCompleted) _lifetime.Dispose();
@@ -537,9 +595,13 @@ public sealed class SpeedBarForm : Form
         base.Dispose(disposing);
     }
 
-    // Older files also carry a DisplayMode field; unknown properties are ignored on read.
+    // Older DisplayMode and Locked properties are ignored; position and shortcuts survive.
     private sealed record UiPreferences(int X, int Y, bool AlwaysOnTop, bool ShortcutConfigured = false,
-        ShortcutDefinition? Shortcut = null, bool Locked = false, int OpacityPercent = DefaultOpacityPercent);
+        ShortcutDefinition? Shortcut = null, int OpacityPercent = DefaultOpacityPercent);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetLayeredWindowAttributes(nint window, uint key, byte alpha, uint flags);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
