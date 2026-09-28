@@ -17,8 +17,15 @@ internal static class FullscreenWindow
         if (process == Environment.ProcessId) return false;
         if (!GetWindowRect(window, out Rect bounds)) return false;
         screen = Screen.FromHandle(window).Bounds;
-        return CoversScreen(Rectangle.FromLTRB(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom), screen);
+        const long caption = 0x00C00000; // WS_CAPTION
+        bool maximizedWithCaption = IsZoomed(window) && (GetWindowLongPtr(window, -16).ToInt64() & caption) == caption;
+        return IsFullscreen(Rectangle.FromLTRB(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom), screen, maximizedWithCaption);
     }
+
+    // A maximized window that still has its title bar is an ordinary window, even when an
+    // auto-hidden taskbar lets it (and its invisible resize border) span the whole monitor.
+    internal static bool IsFullscreen(Rectangle window, Rectangle screen, bool maximizedWithCaption) =>
+        !maximizedWithCaption && CoversScreen(window, screen);
 
     // Use full monitor bounds: a maximized window leaving room for the taskbar
     // must not be classified as borderless fullscreen.
@@ -31,6 +38,8 @@ internal static class FullscreenWindow
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint window);
+    [DllImport("user32.dll")] private static extern bool IsZoomed(nint window);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern nint GetWindowLongPtr(nint window, int index);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out Rect rect);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint process);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint window, StringBuilder name, int count);

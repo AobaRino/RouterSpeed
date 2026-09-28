@@ -75,9 +75,11 @@ internal static class OverlayUiCheck
             monitor.ApplyOrder();
             Rectangle screen = Screen.FromHandle(peer).Bounds;
             Check(Field<bool>(bar, "_miniMode"), "Fullscreen foreground selects mini mode");
-            Check(bar.Right == screen.Right && Math.Abs(bar.Top - (screen.Top + (screen.Height - bar.Height) / 2)) <= 1,
-                "Mini panel sits at the right edge and vertical center of the fullscreen monitor");
-            Check(bar.Width < normal.Width && bar.Height < normal.Height, "Mini panel is smaller than normal panel");
+            Check(normal.Size == new Size((int)Math.Round(174 * bar.DeviceDpi / 96f), (int)Math.Round(32 * bar.DeviceDpi / 96f)), $"Normal panel is the compact 174x32 logical size (got {normal.Size})");
+            Check(bar.Right == screen.Right && bar.Bottom == screen.Bottom, "Mini bars sit in the bottom-right corner of the fullscreen monitor");
+            Check(bar.Width == 2 && bar.Height == screen.Height / 4, $"Mini bars are two 1px columns a quarter of the screen tall (got {bar.Size})");
+            Check(GetLayeredWindowAttributes(bar.Handle, out uint key, out byte miniAlpha, out uint miniFlags) && (miniFlags & 1) != 0 && key == (uint)ColorTranslator.ToWin32(Color.FromArgb(255, 0, 255)) && miniAlpha == 255,
+                "Mini mode keys out its background and draws bars at full opacity");
             using (var bitmap = new Bitmap(bar.Width, bar.Height))
             { bar.DrawToBitmap(bitmap, bar.ClientRectangle); bitmap.Save(Path.Combine(folder, "mini.png")); }
             typeof(SpeedBarForm).GetMethod("SavePreferences", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(bar, null);
@@ -87,8 +89,25 @@ internal static class OverlayUiCheck
             SendMessage(peer, 0x8042, 0, 0);
             monitor.ApplyOrder();
             Check(!Field<bool>(bar, "_miniMode") && bar.Bounds == normal, "Leaving fullscreen restores original size and position");
+            Check(GetLayeredWindowAttributes(bar.Handle, out _, out _, out uint normalFlags) && normalFlags == 2 && bar.BackColor == Color.Black,
+                "Leaving fullscreen restores the black, uniformly translucent panel");
             Check(!FullscreenWindow.CoversScreen(new Rectangle(0, 0, 1920, 1040), new Rectangle(0, 0, 1920, 1080)), "Taskbar-sized gap is not fullscreen");
             Check(FullscreenWindow.CoversScreen(new Rectangle(-1920, -200, 1920, 1080), new Rectangle(-1920, -200, 1920, 1080)), "Fullscreen geometry supports negative monitor coordinates");
+            // Under an auto-hidden taskbar a maximized window spans the monitor plus its invisible
+            // border. Windows clamps test windows to the real work area, so check the geometry directly.
+            var autoHideMaximized = Rectangle.FromLTRB(-8, -8, 1928, 1088);
+            var monitor1080 = new Rectangle(0, 0, 1920, 1080);
+            Check(FullscreenWindow.CoversScreen(autoHideMaximized, monitor1080), "Auto-hide maximized geometry alone looks fullscreen");
+            Check(!FullscreenWindow.IsFullscreen(autoHideMaximized, monitor1080, maximizedWithCaption: true), "A maximized window with a title bar is not fullscreen");
+            Check(FullscreenWindow.IsFullscreen(monitor1080, monitor1080, maximizedWithCaption: false), "A borderless monitor-sized window is fullscreen");
+            SendMessage(peer, 0x8043, 1, 0);
+            Check(!FullscreenWindow.TryGetScreen(peer, out _), "A live maximized window with a title bar is not fullscreen");
+            SendMessage(peer, 0x8043, 0, 0);
+            SendMessage(peer, 0x8042, 1, 0);
+            Check(FullscreenWindow.TryGetScreen(peer, out _), "A borderless screen-sized window is fullscreen");
+            SendMessage(peer, 0x8042, 0, 0);
+            Check(SpeedBarForm.MiniBarPixels(0, 100) == 0 && SpeedBarForm.MiniBarPixels(128d * 1024 * 1024, 100) == 100 &&
+                SpeedBarForm.MiniBarPixels(1024 * 1024, 100) is > 50 and < 70, "Mini bar length is logarithmic up to 1 Gbit/s");
             suspended = true;
             using var positionSpy = new PositionSpy(bar.Handle);
             Check(MovePeer(peer, -1) != 0, "Peer can reorder while monitor is suspended");
@@ -140,6 +159,16 @@ internal static class OverlayUiCheck
                 Wait(() => Field<bool>(startupBar, "_miniMode"), 1500);
                 Check(Field<bool>(startupBar, "_miniMode"), "Starting during fullscreen immediately selects mini mode");
                 Check(Field<Point>(startupBar, "_normalLocation") == new Point(40, 40), "Fullscreen startup preserves saved normal location");
+                using (var bars = new Bitmap(startupBar.Width, startupBar.Height))
+                {
+                    startupBar.DrawToBitmap(bars, startupBar.ClientRectangle);
+                    bars.Save(Path.Combine(folder, "mini-bars.png"));
+                    int bottom = bars.Height - 1;
+                    Check(bars.GetPixel(0, bottom).ToArgb() == Color.FromArgb(64, 220, 128).ToArgb() && bars.GetPixel(1, bottom).ToArgb() == Color.FromArgb(64, 220, 128).ToArgb(),
+                        "Both mini columns start with download green at the bottom edge");
+                    Check(bars.GetPixel(0, 0).ToArgb() == Color.FromArgb(255, 0, 255).ToArgb(), "Unused column height is the keyed-out background");
+                    Check(Enumerable.Range(0, bars.Height).Any(y => bars.GetPixel(1, y).ToArgb() == Color.FromArgb(255, 160, 48).ToArgb()), "Proxy upload is stacked in orange");
+                }
                 SendMessage(peer, 0x8042, 0, 0);
                 startupBar.UpdateFullscreenLayout(peer);
                 Check(startupBar.Location == new Point(40, 40) && !Field<bool>(startupBar, "_miniMode"), "Fullscreen startup restores saved normal location on exit");
@@ -229,6 +258,14 @@ internal static class OverlayUiCheck
             if (message.Msg == 0x8042)
             {
                 Bounds = message.WParam != 0 ? Screen.FromHandle(Handle).Bounds : new Rectangle(40, 40, 320, 130);
+                return;
+            }
+            if (message.Msg == 0x8043)
+            {
+                bool maximize = message.WParam != 0;
+                FormBorderStyle = maximize ? FormBorderStyle.Sizable : FormBorderStyle.None;
+                WindowState = maximize ? FormWindowState.Maximized : FormWindowState.Normal;
+                if (!maximize) Bounds = new Rectangle(40, 40, 320, 130);
                 return;
             }
             base.WndProc(ref message);

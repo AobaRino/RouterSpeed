@@ -13,16 +13,20 @@ namespace RouterSpeed;
 /// </summary>
 public sealed class SpeedBarForm : Form
 {
-    private const int LogicalWidth = 270;
-    private const int LogicalHeight = 56;
-    private const int MiniWidth = 164;
-    private const int MiniHeight = 40;
-    private const int Inset = 5;
-    // Sampled from the TrafficMonitor skin this panel imitates: a dark teal plate at 80%
-    // window opacity, square corners, a hairline border and a divider between the rows.
-    private static readonly Color Surface = Color.FromArgb(16, 50, 60);
+    // Borderless, margin-free two-row panel sized to its widest value ("1023 KB/s") at 12px.
+    private const int LogicalWidth = 174;
+    private const int LogicalHeight = 32;
+    private const int RowHeight = 16;
+    private static readonly Color Surface = Color.Black;
     private static readonly Color Foreground = Color.FromArgb(246, 250, 252);
-    private static readonly Color Edge = Color.FromArgb(46, 255, 255, 255);
+    // Fullscreen mini mode: two 1px columns in the monitor's bottom-right corner, direct on
+    // the left and proxy on the right. Download is stacked from the bottom, upload above it.
+    private const int MiniColumns = 2;
+    private static readonly Color MiniTransparent = Color.FromArgb(255, 0, 255);
+    private static readonly Color DownloadColor = Color.FromArgb(64, 220, 128);
+    private static readonly Color UploadColor = Color.FromArgb(255, 160, 48);
+    // Log scale up to ~1 Gbit/s, so idle chatter and a full download both stay readable.
+    private const double MiniFullScale = 128d * 1024 * 1024;
     private const int DefaultOpacityPercent = 80;
     private static readonly int[] OpacityChoices = [100, 90, 80, 70, 60, 50];
     // Tray icon colours: cyan for direct, violet for proxy, grey while disconnected.
@@ -36,8 +40,7 @@ public sealed class SpeedBarForm : Form
     private readonly NotifyIcon _tray = new();
     private readonly GlobalHotkey _hotkey;
     private readonly StartupRegistration _startup = new();
-    private readonly Font _font = new("Microsoft YaHei UI", 14f, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Font _miniFont = new("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font _font = new("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly string _preferencesPath;
     private readonly PanelOrderMonitor _panelOrder;
     private readonly ToolStripMenuItem _topmostItem;
@@ -180,7 +183,12 @@ public sealed class SpeedBarForm : Form
 
     private void ApplyPanelOpacity()
     {
-        if (IsHandleCreated)
+        if (!IsHandleCreated) return;
+        // Mini mode keys out the background colour (LWA_COLORKEY | LWA_ALPHA) so only the
+        // coloured bar pixels are drawn over the fullscreen app, at full strength.
+        if (_miniMode)
+            SetLayeredWindowAttributes(Handle, (uint)ColorTranslator.ToWin32(MiniTransparent), 255, 3);
+        else
             SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(255 * _opacityPercent / 100d), 2);
     }
 
@@ -254,29 +262,23 @@ public sealed class SpeedBarForm : Form
     {
         base.OnPaint(e);
         Graphics g = e.Graphics;
+        if (_miniMode)
+        {
+            PaintMiniColumn(g, 0, _snapshot.DirectDown, _snapshot.DirectUp);
+            PaintMiniColumn(g, 1, _snapshot.ProxyDown, _snapshot.ProxyUp);
+            return;
+        }
         float scale = DeviceDpi / 96f;
         g.ScaleTransform(scale, scale);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        float width = ClientSize.Width / scale;
-        float height = ClientSize.Height / scale;
-        using var edge = new Pen(Edge);
-        g.DrawRectangle(edge, .5f, .5f, width - 1, height - 1);
         // A disconnected panel greys out completely instead of showing a warning marker.
         Color text = _snapshot.Connected ? Foreground : Muted;
-        if (_miniMode)
-        {
-            PaintMiniRow(g, "直", 0, _snapshot.DirectDown, _snapshot.DirectUp, text);
-            PaintMiniRow(g, "代", MiniHeight / 2f, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
-            return;
-        }
-        float rowHeight = (height - 2 * Inset) / 2;
-        PaintRow(g, "直连:", Inset, rowHeight, _snapshot.DirectDown, _snapshot.DirectUp, text);
-        g.DrawLine(edge, 8, Inset + rowHeight, width - 8, Inset + rowHeight);
-        PaintRow(g, "代理:", Inset + rowHeight, rowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
+        PaintRow(g, "直连:", 0, _snapshot.DirectDown, _snapshot.DirectUp, text);
+        PaintRow(g, "代理:", RowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
     }
 
-    private void PaintRow(Graphics g, string label, float y, float height, double down, double up, Color text)
+    private void PaintRow(Graphics g, string label, float y, double down, double up, Color text)
     {
         using var brush = new SolidBrush(text);
         using var format = new StringFormat(StringFormat.GenericTypographic)
@@ -285,41 +287,41 @@ public sealed class SpeedBarForm : Form
             Alignment = StringAlignment.Near,
             LineAlignment = StringAlignment.Center
         };
-        float middle = y + height / 2;
-        // The partial-classification marker has its own slot in the left margin, so the
-        // label and colon stay put when it appears or disappears.
-        if (HasUnclassifiedTraffic) g.DrawString("*", _font, brush, new RectangleF(4, y, 8, height), format);
-        g.DrawString(label, _font, brush, new RectangleF(12, y, 60, height), format);
-        DrawArrow(g, brush, 62, middle, down: true);
-        g.DrawString(FormatRate(down, _snapshot.Connected), _font, brush, new RectangleF(73, y, 90, height), format);
-        DrawArrow(g, brush, 165, middle, down: false);
-        g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(176, y, 90, height), format);
+        float middle = y + RowHeight / 2f;
+        // The partial-classification marker has its own 5px slot, so the label and colon
+        // stay put when it appears or disappears.
+        if (HasUnclassifiedTraffic) g.DrawString("*", _font, brush, new RectangleF(0, y, 5, RowHeight), format);
+        g.DrawString(label, _font, brush, new RectangleF(5, y, 30, RowHeight), format);
+        DrawArrow(g, brush, 35, middle, down: true);
+        g.DrawString(FormatRate(down, _snapshot.Connected), _font, brush, new RectangleF(43, y, 62, RowHeight), format);
+        DrawArrow(g, brush, 107, middle, down: false);
+        g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(115, y, 62, RowHeight), format);
     }
 
-    private void PaintMiniRow(Graphics g, string label, float y, double down, double up, Color text)
+    // Drawn in physical pixels: one crisp 1px column per class, download from the bottom
+    // and upload stacked above it, each getting up to half of the column.
+    private void PaintMiniColumn(Graphics g, int x, double down, double up)
     {
-        using var brush = new SolidBrush(text);
-        using var format = new StringFormat(StringFormat.GenericTypographic)
-        { FormatFlags = StringFormatFlags.NoWrap, LineAlignment = StringAlignment.Center };
-        const float rowHeight = MiniHeight / 2f;
-        g.DrawString(label, _miniFont, brush, new RectangleF(4, y, 17, rowHeight), format);
-        DrawArrow(g, brush, 23, y + rowHeight / 2, true);
-        g.DrawString(FormatMiniRate(down, _snapshot.Connected), _miniFont, brush, new RectangleF(34, y, 55, rowHeight), format);
-        DrawArrow(g, brush, 91, y + rowHeight / 2, false);
-        g.DrawString(FormatMiniRate(up, _snapshot.Connected), _miniFont, brush, new RectangleF(102, y, 59, rowHeight), format);
+        if (!_snapshot.Connected) return;
+        int length = ClientSize.Height;
+        int downPixels = MiniBarPixels(down, length / 2), upPixels = MiniBarPixels(up, length / 2);
+        using var downBrush = new SolidBrush(DownloadColor);
+        using var upBrush = new SolidBrush(UploadColor);
+        g.FillRectangle(downBrush, x, length - downPixels, 1, downPixels);
+        g.FillRectangle(upBrush, x, length - downPixels - upPixels, 1, upPixels);
     }
 
-    private static string FormatMiniRate(double rate, bool connected)
+    internal static int MiniBarPixels(double bytesPerSecond, int maximum)
     {
-        if (connected && double.IsFinite(rate) && rate >= 999 * Math.Pow(1024, 4)) return "999T+";
-        return FormatRate(rate, connected).Replace(" B/s", "B").Replace(" KB/s", "K").Replace(" MB/s", "M")
-            .Replace(" GB/s", "G").Replace(" TB/s", "T");
+        if (!double.IsFinite(bytesPerSecond) || bytesPerSecond <= 0 || maximum <= 0) return 0;
+        double fraction = Math.Log2(1 + bytesPerSecond / 1024) / Math.Log2(1 + MiniFullScale / 1024);
+        return (int)Math.Round(Math.Clamp(fraction, 0, 1) * maximum);
     }
 
-    /// <summary>A squat filled triangle (7×5 logical px) reads as up/down at small sizes better than a text arrow.</summary>
+    /// <summary>A squat filled triangle (6×4 logical px) reads as up/down at small sizes better than a text arrow.</summary>
     private static void DrawArrow(Graphics g, Brush brush, float left, float middle, bool down)
     {
-        const float w = 7, h = 5;
+        const float w = 6, h = 4;
         float top = middle - h / 2, bottom = middle + h / 2;
         PointF[] points = down
             ? [new(left, top), new(left + w, top), new(left + w / 2, bottom)]
@@ -350,35 +352,46 @@ public sealed class SpeedBarForm : Form
         Invalidate();
     }
 
-    private void ApplyPanelSize() => ClientSize = new Size(
-        (int)Math.Round((_miniMode ? MiniWidth : LogicalWidth) * DeviceDpi / 96f),
-        (int)Math.Round((_miniMode ? MiniHeight : LogicalHeight) * DeviceDpi / 96f));
+    // The mini columns are literal 1px wide and a quarter of the fullscreen monitor tall.
+    private void ApplyPanelSize() => ClientSize = _miniMode
+        ? new Size(MiniColumns, Math.Max(2, _fullscreenArea.Height / 4))
+        : new Size((int)Math.Round(LogicalWidth * DeviceDpi / 96f), (int)Math.Round(LogicalHeight * DeviceDpi / 96f));
 
     internal void UpdateFullscreenLayout(nint foreground)
     {
         if (TopMost && foreground == 0) return;
         Rectangle screen = Rectangle.Empty;
         bool mini = TopMost && FullscreenWindow.TryGetScreen(foreground, out screen);
-        bool changed = mini != _miniMode;
         if (mini)
         {
-            _fullscreenArea = screen;
-            if (!_miniMode) { _normalLocation = Location; _miniMode = true; ApplyPanelSize(); }
+            if (!_miniMode || screen != _fullscreenArea)
+            {
+                if (!_miniMode) _normalLocation = Location;
+                _fullscreenArea = screen;
+                SetMiniMode(true);
+            }
             PositionMiniPanel();
         }
         else if (_miniMode)
         {
-            _miniMode = false;
-            ApplyPanelSize();
+            SetMiniMode(false);
             Location = _normalLocation;
             ClampToWorkArea();
         }
-        if (changed) Invalidate();
+    }
+
+    private void SetMiniMode(bool mini)
+    {
+        _miniMode = mini;
+        BackColor = mini ? MiniTransparent : Surface;
+        ApplyPanelSize();
+        ApplyPanelOpacity();
+        Invalidate();
     }
 
     private void PositionMiniPanel()
     {
-        Point point = new(_fullscreenArea.Right - Width, _fullscreenArea.Top + (_fullscreenArea.Height - Height) / 2);
+        Point point = new(_fullscreenArea.Right - Width, _fullscreenArea.Bottom - Height);
         if (Location != point) Location = point;
     }
 
@@ -443,7 +456,7 @@ public sealed class SpeedBarForm : Form
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
             "浮窗点击穿透；右键托盘图标打开菜单。",
             TopMost ? "保持置顶已开启。" : "浮窗置底，其他应用窗口可以覆盖它。",
-            _miniMode ? "全屏迷你模式：直 / 代，▼ 下载、▲ 上传；B/K/M/G/T 每秒。" : "置顶时遇到全屏窗口自动缩小，退出后恢复。",
+            _miniMode ? "全屏迷你模式：右下角两条 1px 竖条，左直连、右代理；绿色下载、橙色上传。" : "置顶时遇到全屏窗口自动缩成右下角两条竖线，退出后恢复。",
             "移动浮窗请使用托盘菜单的“位置设置”。"
         ];
         var items = _detailsItem.DropDownItems;
@@ -586,7 +599,6 @@ public sealed class SpeedBarForm : Form
             _hotkey.Dispose();
             _menu.Dispose();
             _font.Dispose();
-            _miniFont.Dispose();
             // The poller may still be unwinding its cancellation; keep its token source alive
             // until then so implementations can safely register cancellation while exiting.
             if (_pollTask is null || _pollTask.IsCompleted) _lifetime.Dispose();
