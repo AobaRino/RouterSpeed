@@ -19,15 +19,13 @@ public sealed class SpeedBarForm : Form
     private const int RowHeight = 16;
     private static readonly Color Surface = Color.Black;
     private static readonly Color Foreground = Color.FromArgb(246, 250, 252);
-    // Fullscreen mini mode: one 4px black strip in the monitor's bottom-right corner. The
-    // filled length shows total traffic on a log scale up to ~1 Gbit/s, so idle chatter and a
-    // full download both stay readable; inside it direct (bottom) and proxy (above) split that
-    // length by their real share, never by stacking separately scaled segments.
-    private const int MiniWidth = 4;
-    private const double MiniFullScale = 128d * 1024 * 1024;
+    // Fullscreen mini mode: one 11px row in the monitor's top-right corner,
+    // "直 ▼113M ▲1.2M  代 ▼4.9K ▲4.8K", with fixed slots sized for the widest value "1023K".
+    private const int MiniWidth = 200;
+    private const int MiniHeight = 14;
     private const int DefaultOpacityPercent = 80;
     private static readonly int[] OpacityChoices = [100, 90, 80, 70, 60, 50];
-    // Cyan for direct and violet for proxy (tray icon and mini strip); grey while disconnected.
+    // Tray icon colours: cyan for direct, violet for proxy, grey while disconnected.
     private static readonly Color Muted = Color.FromArgb(130, 142, 161);
     private static readonly Color DirectColor = Color.FromArgb(88, 214, 215);
     private static readonly Color ProxyColor = Color.FromArgb(180, 152, 255);
@@ -39,6 +37,7 @@ public sealed class SpeedBarForm : Form
     private readonly GlobalHotkey _hotkey;
     private readonly StartupRegistration _startup = new();
     private readonly Font _font = new("Microsoft YaHei UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font _miniFont = new("Microsoft YaHei UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly string _preferencesPath;
     private readonly PanelOrderMonitor _panelOrder;
     private readonly ToolStripMenuItem _topmostItem;
@@ -255,17 +254,18 @@ public sealed class SpeedBarForm : Form
     {
         base.OnPaint(e);
         Graphics g = e.Graphics;
-        if (_miniMode)
-        {
-            PaintMiniStrip(g);
-            return;
-        }
         float scale = DeviceDpi / 96f;
         g.ScaleTransform(scale, scale);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         // A disconnected panel greys out completely instead of showing a warning marker.
         Color text = _snapshot.Connected ? Foreground : Muted;
+        if (_miniMode)
+        {
+            PaintMiniGroup(g, "直", 0, _snapshot.DirectDown, _snapshot.DirectUp, text);
+            PaintMiniGroup(g, "代", 104, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
+            return;
+        }
         PaintRow(g, "直连:", 0, _snapshot.DirectDown, _snapshot.DirectUp, text);
         PaintRow(g, "代理:", RowHeight, _snapshot.ProxyDown, _snapshot.ProxyUp, text);
     }
@@ -287,46 +287,36 @@ public sealed class SpeedBarForm : Form
         g.DrawString(FormatRate(up, _snapshot.Connected), _font, brush, new RectangleF(110, y, 62, RowHeight), format);
     }
 
-    // Drawn in whole physical pixels on the black strip, direct from the bottom edge and
-    // proxy directly above it; upload and download of each class are combined.
-    private void PaintMiniStrip(Graphics g)
+    // One class in the mini row: label, ▼ download, ▲ upload, each value in a fixed 33px slot.
+    private void PaintMiniGroup(Graphics g, string label, float x, double down, double up, Color text)
     {
-        if (!_snapshot.Connected) return;
-        int length = ClientSize.Height;
-        var (direct, proxy) = MiniSegments(_snapshot.DirectDown + _snapshot.DirectUp, _snapshot.ProxyDown + _snapshot.ProxyUp, length);
-        using var directBrush = new SolidBrush(DirectColor);
-        using var proxyBrush = new SolidBrush(ProxyColor);
-        g.FillRectangle(directBrush, 0, length - direct, ClientSize.Width, direct);
-        g.FillRectangle(proxyBrush, 0, length - direct - proxy, ClientSize.Width, proxy);
+        using var brush = new SolidBrush(text);
+        using var format = new StringFormat(StringFormat.GenericTypographic)
+        {
+            FormatFlags = StringFormatFlags.NoWrap,
+            Alignment = StringAlignment.Near,
+            LineAlignment = StringAlignment.Center
+        };
+        const float middle = MiniHeight / 2f;
+        g.DrawString(label, _miniFont, brush, new RectangleF(x, 0, 12, MiniHeight), format);
+        DrawArrow(g, brush, x + 13, middle, down: true, width: 5, height: 3);
+        g.DrawString(FormatMiniRate(down, _snapshot.Connected), _miniFont, brush, new RectangleF(x + 20, 0, 34, MiniHeight), format);
+        DrawArrow(g, brush, x + 56, middle, down: false, width: 5, height: 3);
+        g.DrawString(FormatMiniRate(up, _snapshot.Connected), _miniFont, brush, new RectangleF(x + 63, 0, 34, MiniHeight), format);
     }
 
-    internal static (int Direct, int Proxy) MiniSegments(double direct, double proxy, int length)
+    // "113 MB/s" → "113M": the per-second unit is implied in the mini row.
+    internal static string FormatMiniRate(double bytesPerSecond, bool connected = true)
     {
-        direct = double.IsFinite(direct) && direct > 0 ? direct : 0;
-        proxy = double.IsFinite(proxy) && proxy > 0 ? proxy : 0;
-        double total = direct + proxy;
-        int filled = MiniBarPixels(total, length);
-        if (filled == 0) return (0, 0);
-        int directPixels = (int)Math.Round(direct / total * filled), proxyPixels = filled - directPixels;
-        // A class carrying real traffic (1 KB/s or more) stays visible even when dwarfed.
-        const double visible = 1024;
-        const int minimum = 2;
-        if (proxyPixels < minimum && proxy >= visible) { proxyPixels = Math.Min(minimum, filled); directPixels = filled - proxyPixels; }
-        if (directPixels < minimum && direct >= visible) { directPixels = Math.Min(minimum, filled); proxyPixels = filled - directPixels; }
-        return (directPixels, proxyPixels);
+        string rate = FormatRate(bytesPerSecond, connected);
+        int space = rate.IndexOf(' ');
+        return space < 0 ? rate : rate[..space] + rate[space + 1];
     }
 
-    internal static int MiniBarPixels(double bytesPerSecond, int maximum)
+    /// <summary>A squat filled triangle reads as up/down at small sizes better than a text arrow.</summary>
+    private static void DrawArrow(Graphics g, Brush brush, float left, float middle, bool down, float width = 6, float height = 4)
     {
-        if (!double.IsFinite(bytesPerSecond) || bytesPerSecond <= 0 || maximum <= 0) return 0;
-        double fraction = Math.Log2(1 + bytesPerSecond / 1024) / Math.Log2(1 + MiniFullScale / 1024);
-        return (int)Math.Round(Math.Clamp(fraction, 0, 1) * maximum);
-    }
-
-    /// <summary>A squat filled triangle (6×4 logical px) reads as up/down at small sizes better than a text arrow.</summary>
-    private static void DrawArrow(Graphics g, Brush brush, float left, float middle, bool down)
-    {
-        const float w = 6, h = 4;
+        float w = width, h = height;
         float top = middle - h / 2, bottom = middle + h / 2;
         PointF[] points = down
             ? [new(left, top), new(left + w, top), new(left + w / 2, bottom)]
@@ -357,9 +347,8 @@ public sealed class SpeedBarForm : Form
         Invalidate();
     }
 
-    // The mini strip is a quarter of the fullscreen monitor tall.
     private void ApplyPanelSize() => ClientSize = _miniMode
-        ? new Size(Math.Max(1, (int)Math.Round(MiniWidth * DeviceDpi / 96f)), Math.Max(2, _fullscreenArea.Height / 4))
+        ? new Size((int)Math.Round(MiniWidth * DeviceDpi / 96f), (int)Math.Round(MiniHeight * DeviceDpi / 96f))
         : NormalSize;
 
     internal void UpdateFullscreenLayout(nint foreground)
@@ -394,7 +383,7 @@ public sealed class SpeedBarForm : Form
 
     private void PositionMiniPanel()
     {
-        Point point = new(_fullscreenArea.Right - Width, _fullscreenArea.Bottom - Height);
+        Point point = new(_fullscreenArea.Right - Width, _fullscreenArea.Top);
         if (Location != point) Location = point;
     }
 
@@ -459,7 +448,7 @@ public sealed class SpeedBarForm : Form
             "▼ 下载 · ▲ 上传 · 1 KB = 1024 B",
             "浮窗点击穿透；右键托盘图标打开菜单。",
             TopMost ? "保持置顶已开启。" : "浮窗置底，其他应用窗口可以覆盖它。",
-            _miniMode ? "全屏迷你模式：右下角 4px 竖条，下段青色是直连、上段紫色是代理，长度表示总网速。" : "置顶时遇到全屏窗口自动缩成右下角的竖条，退出后恢复。",
+            _miniMode ? "全屏迷你模式：右上角一行，直 / 代各自 ▼ 下载、▲ 上传，B/K/M/G 每秒。" : "置顶时遇到全屏窗口自动缩成右上角的一行数字，退出后恢复。",
             "移动浮窗请使用托盘菜单的“位置设置”。"
         ];
         var items = _detailsItem.DropDownItems;
@@ -622,6 +611,7 @@ public sealed class SpeedBarForm : Form
             _hotkey.Dispose();
             _menu.Dispose();
             _font.Dispose();
+            _miniFont.Dispose();
             // The poller may still be unwinding its cancellation; keep its token source alive
             // until then so implementations can safely register cancellation while exiting.
             if (_pollTask is null || _pollTask.IsCompleted) _lifetime.Dispose();
